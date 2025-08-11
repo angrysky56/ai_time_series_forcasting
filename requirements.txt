@@ -1,8 +1,9 @@
-streamlit
-pandas
-ccxt
-prophet
-plotly
-requests
-statsmodels
-scikit-learn
+streamlit>=1.48.0
+pandas>=2.3.1
+ccxt>=4.4.99
+prophet>=1.1.7
+plotly>=6.2.0
+requests>=2.32.4
+statsmodels>=0.14.5
+scikit-learn>=1.7.1
+numpy>=1.24.0

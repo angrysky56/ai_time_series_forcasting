@@ -14,6 +14,38 @@ This project is an interactive web application that provides cryptocurrency pric
 
 ![alt text](image-1.png)
 
+  Development Plan: Automated Forecasting & Analysis
+
+Done-  Phase 1: Technical Indicators Module
+  First, I'll build the foundation for technical analysis.
+   * Action: Create a new src/technical_analysis.py module.
+   * Details: I will implement functions to calculate Simple Moving Average (SMA), Exponential Moving Average (EMA), and Relative Strength Index (RSI). I'll then
+     update the Streamlit app to display these on the chart.
+
+Done-  Phase 2: Expanding the Forecasting Toolkit
+  Next, I'll add more models to compare against.
+   * Action: Integrate ARIMA and Holt-Winters Exponential Smoothing from the statsmodels library.
+   * Details: This will involve updating requirements.txt, installing the new dependency, and modifying src/forecasting.py to handle different model types.
+
+  Phase 3: Backtesting Framework
+  With multiple models available, we need a way to measure their performance.
+   * Action: Create a src/backtesting.py module.
+   * Details: This module will test the different forecasting models against historical data and score them using standard error metrics like Root Mean Squared Error
+     (RMSE).
+
+  Phase 4: Automated Model Selection
+  This is the core of the new "intelligent" feature.
+   * Action: Implement a "best model" selection process and UI checkbox for Auto-Testing
+   * Details: Before generating a forecast, the application will automatically run a backtest on all available models. It will then select the one with the best score
+     and use it for the final user-facing forecast, informing the user which model was chosen and why.
+
+  Phase 5: Enhanced AI Analysis
+  Finally, I'll feed this new, richer context to the LLM.
+   * Action: Upgrade the prompt engineering in src/llm_integration.py.
+   * Details: The prompt will now include not just the forecast, but also the chosen model, its backtesting accuracy, and the current technical indicator values (e.g.,
+     "The RSI is at 75, indicating overbought conditions"). This will allow for a much more sophisticated and insightful analysis from the LLM.
+
+
 ## Project Structure
 
 ```
