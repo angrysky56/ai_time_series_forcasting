@@ -63,10 +63,10 @@ venv.bak/
 *.pth
 
 # Images
-*.png
-*.jpg
-*.jpeg
-*.gif
+# *.png
+# *.jpg
+# *.jpeg
+# *.gif
 
 # Misc
 *.swp
