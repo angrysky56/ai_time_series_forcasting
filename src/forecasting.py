@@ -17,6 +17,7 @@ def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30):
     if df is None or df.empty:
         return None
 
+
     # Prepare data
     data = df.set_index('timestamp')['close']
 
@@ -29,26 +30,26 @@ def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30):
         return forecast
 
     elif model_name == 'ARIMA':
-        # Note: ARIMA order (p,d,q) is set to a generic default and may need tuning.
         model = ARIMA(data, order=(5, 1, 0))
         fitted_model = model.fit()
         forecast_result = fitted_model.get_forecast(steps=periods)
-        
         forecast_df = forecast_result.summary_frame()
-        forecast_df.reset_index(inplace=True)
-        forecast_df.rename(columns={'index': 'ds', 'mean': 'yhat', 
-                                    'mean_ci_lower': 'yhat_lower', 'mean_ci_upper': 'yhat_upper'}, inplace=True)
-        return forecast_df
+        # Generate future dates for forecast periods
+        last_date = df['timestamp'].max()
+        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=periods, freq='D')
+        forecast_df = forecast_df.reset_index(drop=True)
+        forecast_df['ds'] = future_dates
+        forecast_df.rename(columns={'mean': 'yhat', 'mean_ci_lower': 'yhat_lower', 'mean_ci_upper': 'yhat_upper'}, inplace=True)
+        return forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
     elif model_name == 'ETS':
-        # Holt-Winters Exponential Smoothing
         model = ExponentialSmoothing(data, seasonal='add', seasonal_periods=7, trend='add', damped_trend=True)
         fitted_model = model.fit()
         yhat = fitted_model.forecast(steps=periods)
-        
-        # Create a dataframe and add placeholder for confidence intervals
-        forecast_df = pd.DataFrame({'yhat': yhat})
-        forecast_df['ds'] = forecast_df.index
+        # Generate future dates for forecast periods
+        last_date = df['timestamp'].max()
+        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=periods, freq='D')
+        forecast_df = pd.DataFrame({'ds': future_dates, 'yhat': yhat})
         forecast_df['yhat_lower'] = None
         forecast_df['yhat_upper'] = None
         return forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
@@ -57,7 +58,7 @@ def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30):
         raise ValueError("Invalid model name. Choose from 'Prophet', 'ARIMA', 'ETS'.")
 
 if __name__ == '__main__':
-    from data_fetcher import fetch_crypto_data
+    from .data_fetcher import fetch_crypto_data
 
     symbol = 'BTC/USDT'
     btc_data = fetch_crypto_data(symbol, timeframe='1d', limit=365)
