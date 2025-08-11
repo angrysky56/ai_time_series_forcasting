@@ -39,7 +39,7 @@ exchange_name = st.sidebar.selectbox(
 # Symbol discovery
 if st.sidebar.button("🔍 Discover Symbols", help="Find available trading pairs"):
     with st.spinner(f"Discovering symbols from {exchange_name}..."):
-        symbols = discover_symbols(exchange_name, limit=50)
+        symbols = discover_symbols(exchange_name, limit=500)
         st.session_state.discovered_symbols = symbols
         st.session_state.selected_exchange = exchange_name
     if symbols:
@@ -107,11 +107,11 @@ if use_walkforward:
 st.sidebar.header("📈 Technical Indicators")
 show_sma = st.sidebar.checkbox("SMA")
 if show_sma:
-    st.session_state.sma_window = st.sidebar.number_input("SMA Window", 5, 100, 20)
+    st.session_state.sma_window = st.sidebar.number_input("SMA Window", 5, 100, 55)
 
 show_ema = st.sidebar.checkbox("EMA")
 if show_ema:
-    st.session_state.ema_span = st.sidebar.number_input("EMA Span", 5, 100, 20)
+    st.session_state.ema_span = st.sidebar.number_input("EMA Span", 5, 100, 13)
 
 show_rsi = st.sidebar.checkbox("RSI")
 if show_rsi:

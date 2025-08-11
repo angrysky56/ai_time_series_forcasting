@@ -1,11 +1,16 @@
 import ccxt
+import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+from typing import Literal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+DataSource = Literal['crypto', 'stock', 'auto']
+TimeFrame = Literal['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M']
 
 # Free exchanges with good API support for smaller timeframes
 SUPPORTED_EXCHANGES = {
@@ -19,6 +24,30 @@ SUPPORTED_EXCHANGES = {
     'kucoin': ccxt.kucoin,
     'bybit': ccxt.bybit,
     'gateio': ccxt.gateio
+}
+
+TIMEFRAME_TO_YFINANCE = {
+    '1m': '1m',
+    '5m': '5m',
+    '15m': '15m',
+    '30m': '30m',
+    '1h': '60m',
+    '4h': '1d',  # yfinance doesn't support 4h, use 1d
+    '1d': '1d',
+    '1w': '1wk',
+    '1M': '1mo'
+}
+
+TIMEFRAME_TO_DAYS = {
+    '1m': 7,      # Max 7 days for minute data in yfinance
+    '5m': 60,     # Max 60 days for 5m data
+    '15m': 60,
+    '30m': 60,
+    '1h': 730,    # Max 730 days for hourly
+    '4h': 730,
+    '1d': 5000,   # Many years of daily data
+    '1w': 5000,
+    '1M': 5000
 }
 
 def get_available_exchanges() -> list[str]:
@@ -60,6 +89,89 @@ def discover_symbols(exchange_name: str = 'binance', limit: int = 100) -> list[s
     except Exception as e:
         logger.error(f"Error discovering symbols from {exchange_name}: {e}")
         return []
+
+def fetch_stock_data(
+    symbol: str,
+    timeframe: str = '1d',
+    limit: int = 100
+) -> pd.DataFrame | None:
+    """
+    Fetches historical stock data using yfinance.
+    
+    Args:
+        symbol: Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'SPY')
+        timeframe: The timeframe for the data
+        limit: Number of data points to retrieve
+    
+    Returns:
+        pd.DataFrame: Historical data or None if failed
+    """
+    try:
+        yf_interval = TIMEFRAME_TO_YFINANCE.get(timeframe, '1d')
+        max_days = TIMEFRAME_TO_DAYS.get(timeframe, 730)
+        
+        # Calculate period based on limit and timeframe
+        if timeframe in ['1m', '5m', '15m', '30m']:
+            # Intraday data
+            if timeframe == '1m':
+                candles_per_day = 390
+            elif timeframe == '5m':
+                candles_per_day = 78
+            elif timeframe == '15m':
+                candles_per_day = 26
+            else:  # 30m
+                candles_per_day = 13
+            days_needed = min(int(limit / candles_per_day) + 2, max_days)
+        elif timeframe == '1h':
+            candles_per_day = 24
+            days_needed = min(int(limit / candles_per_day) + 2, max_days)
+        elif timeframe == '1w':
+            days_needed = min(limit * 7 + 14, max_days)
+        elif timeframe == '1M':
+            days_needed = min(limit * 30 + 60, max_days)
+        else:  # Daily
+            days_needed = min(limit + 10, max_days)
+        
+        # Create ticker and fetch data
+        ticker = yf.Ticker(symbol)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_needed)
+        
+        df = ticker.history(
+            start=start_date,
+            end=end_date,
+            interval=yf_interval
+        )
+        
+        if df.empty:
+            logger.error(f"No data returned for {symbol} from yfinance")
+            return None
+        
+        # Standardize column names
+        df = df.reset_index()
+        df.columns = df.columns.str.lower()
+        
+        if 'date' in df.columns:
+            df.rename(columns={'date': 'timestamp'}, inplace=True)
+        elif 'datetime' in df.columns:
+            df.rename(columns={'datetime': 'timestamp'}, inplace=True)
+        
+        # Add metadata
+        df['exchange'] = 'yfinance'
+        df['symbol'] = symbol
+        df['timeframe'] = timeframe
+        df['source'] = 'stock'
+        
+        # Limit to requested number of rows
+        if len(df) > limit:
+            df = df.tail(limit)
+        
+        logger.info(f"Successfully fetched {len(df)} records for {symbol} from yfinance")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch {symbol} from yfinance: {e}")
+        return None
 
 def fetch_crypto_data(
     symbol: str,

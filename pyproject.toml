@@ -1,0 +1,25 @@
+[project]
+name = "ai-time-series-forcasting"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "ccxt>=4.4.99",
+    "darts>=0.30.0",
+    "lightgbm>=4.0.0",
+    "neuralprophet>=0.8.0",
+    "numpy>=1.24.0",
+    "optuna>=4.4.0",
+    "pandas>=2.3.1",
+    "plotly>=6.2.0",
+    "prophet>=1.1.7",
+    "pytorch-lightning>=2.0.0",
+    "requests>=2.32.4",
+    "scikit-learn>=1.7.1",
+    "statsmodels>=0.14.5",
+    "streamlit>=1.48.0",
+    "talipp>=2.6.0",
+    "tensorflow>=2.19.0",
+    "torch>=2.0.0",
+    "xgboost>=2.0.0",
+    "yfinance>=0.2.65",
+]
