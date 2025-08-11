@@ -10,7 +10,7 @@ This project is an interactive web application that provides cryptocurrency pric
 -   **AI-Powered Analysis:** Connects to a local LLM (via LM Studio) to provide a narrative interpretation of the forecast data.
 -   **Interactive Charts:** Visualizes historical data and forecasts using Plotly.
 
-![alt text](image.png)
+![alt text](image-2.png)
 
 ![alt text](image-1.png)
 

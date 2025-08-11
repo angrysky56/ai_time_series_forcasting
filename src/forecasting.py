@@ -1,12 +1,14 @@
 import pandas as pd
 from prophet import Prophet
+from statsmodels.tsa.api import ARIMA, ExponentialSmoothing
 
-def generate_forecast(df: pd.DataFrame, periods: int = 30):
+def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30):
     """
-    Generates a forecast using the Prophet model.
+    Generates a forecast using the selected model.
 
     Args:
         df (pd.DataFrame): The input DataFrame with historical data.
+        model_name (str): The name of the model to use ('Prophet', 'ARIMA', 'ETS').
         periods (int): The number of future periods to forecast.
 
     Returns:
@@ -15,28 +17,63 @@ def generate_forecast(df: pd.DataFrame, periods: int = 30):
     if df is None or df.empty:
         return None
 
-    # Prophet requires columns 'ds' (timestamp) and 'y' (value)
-    prophet_df = df.rename(columns={'timestamp': 'ds', 'close': 'y'})[['ds', 'y']]
+    # Prepare data
+    data = df.set_index('timestamp')['close']
 
-    model = Prophet()
-    model.fit(prophet_df)
+    if model_name == 'Prophet':
+        prophet_df = df.rename(columns={'timestamp': 'ds', 'close': 'y'})[['ds', 'y']]
+        model = Prophet()
+        model.fit(prophet_df)
+        future = model.make_future_dataframe(periods=periods)
+        forecast = model.predict(future)
+        return forecast
 
-    future = model.make_future_dataframe(periods=periods)
-    forecast = model.predict(future)
+    elif model_name == 'ARIMA':
+        # Note: ARIMA order (p,d,q) is set to a generic default and may need tuning.
+        model = ARIMA(data, order=(5, 1, 0))
+        fitted_model = model.fit()
+        forecast_result = fitted_model.get_forecast(steps=periods)
+        
+        forecast_df = forecast_result.summary_frame()
+        forecast_df.reset_index(inplace=True)
+        forecast_df.rename(columns={'index': 'ds', 'mean': 'yhat', 
+                                    'mean_ci_lower': 'yhat_lower', 'mean_ci_upper': 'yhat_upper'}, inplace=True)
+        return forecast_df
 
-    return forecast
+    elif model_name == 'ETS':
+        # Holt-Winters Exponential Smoothing
+        model = ExponentialSmoothing(data, seasonal='add', seasonal_periods=7, trend='add', damped_trend=True)
+        fitted_model = model.fit()
+        yhat = fitted_model.forecast(steps=periods)
+        
+        # Create a dataframe and add placeholder for confidence intervals
+        forecast_df = pd.DataFrame({'yhat': yhat})
+        forecast_df['ds'] = forecast_df.index
+        forecast_df['yhat_lower'] = None
+        forecast_df['yhat_upper'] = None
+        return forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+
+    else:
+        raise ValueError("Invalid model name. Choose from 'Prophet', 'ARIMA', 'ETS'.")
 
 if __name__ == '__main__':
-    # Example usage:
     from data_fetcher import fetch_crypto_data
 
-    btc_symbol = 'BTC/USDT'
-    btc_data = fetch_crypto_data(btc_symbol, timeframe='1d', limit=365)
+    symbol = 'BTC/USDT'
+    btc_data = fetch_crypto_data(symbol, timeframe='1d', limit=365)
 
     if btc_data is not None:
-        print(f"Successfully fetched data for {btc_symbol}. Generating forecast...")
-        forecast_data = generate_forecast(btc_data, periods=90)
-        if forecast_data is not None:
-            print("Forecast generated successfully.")
-            # Print the last few rows of the forecast including the predicted values
-            print(forecast_data[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail())
+        print(f"--- Testing Prophet for {symbol} ---")
+        prophet_forecast = generate_forecast(btc_data.copy(), 'Prophet', 90)
+        if prophet_forecast is not None:
+            print(prophet_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail())
+
+        print(f"\n--- Testing ARIMA for {symbol} ---")
+        arima_forecast = generate_forecast(btc_data.copy(), 'ARIMA', 90)
+        if arima_forecast is not None:
+            print(arima_forecast.tail())
+
+        print(f"\n--- Testing ETS for {symbol} ---")
+        ets_forecast = generate_forecast(btc_data.copy(), 'ETS', 90)
+        if ets_forecast is not None:
+            print(ets_forecast.tail())

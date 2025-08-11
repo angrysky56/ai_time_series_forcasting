@@ -4,3 +4,4 @@ ccxt
 prophet
 plotly
 requests
+statsmodels
