@@ -12,6 +12,8 @@ This project is an interactive web application that provides cryptocurrency pric
 
 ![alt text](image.png)
 
+![alt text](image-1.png)
+
 ## Project Structure
 
 ```
