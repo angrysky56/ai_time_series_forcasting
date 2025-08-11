@@ -60,8 +60,8 @@ TIMEFRAME_TO_FREQ = {
     '5m': '5min',     # 5 minutes
     '15m': '15min',   # 15 minutes
     '30m': '30min',   # 30 minutes
-    '1h': '1H',       # 1 hour
-    '4h': '4H',       # 4 hours
+    '1h': '1h',       # 1 hour (updated from deprecated 'H')
+    '4h': '4h',       # 4 hours (updated from deprecated 'H')
     '1d': '1D',       # 1 day
     '1w': '1W',       # 1 week
     '1M': '1M',       # 1 month
@@ -375,9 +375,15 @@ def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30) -> p
             return _forecast_prophet(df, periods, freq)
         elif model_name == 'ARIMA':
             data = df.set_index('timestamp')['close']
+            # Set frequency to prevent statsmodels warnings
+            if freq in TIMEFRAME_TO_FREQ:
+                data = data.asfreq(TIMEFRAME_TO_FREQ[freq])
             return _forecast_arima(data, periods, freq)
         elif model_name == 'ETS':
             data = df.set_index('timestamp')['close']
+            # Set frequency to prevent statsmodels warnings
+            if freq in TIMEFRAME_TO_FREQ:
+                data = data.asfreq(TIMEFRAME_TO_FREQ[freq])
             return _forecast_ets(data, periods, freq)
         elif model_name in ['LSTM', 'RNN', 'GRU']:
             return _forecast_rnn(df, periods, freq, model_type=model_name)
