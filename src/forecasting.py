@@ -68,16 +68,19 @@ def _timeseries_to_df(ts: TimeSeries) -> pd.DataFrame:
     df['yhat_upper'] = None
     return df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 # Enhanced mapping for timeframes to pandas frequency strings
+# Based on pandas 2.x standards and statsmodels compatibility
 TIMEFRAME_TO_FREQ = {
     '1m': '1min',     # 1 minute
     '5m': '5min',     # 5 minutes
     '15m': '15min',   # 15 minutes
     '30m': '30min',   # 30 minutes
-    '1h': '1h',       # 1 hour (updated from deprecated 'H')
-    '4h': '4h',       # 4 hours (updated from deprecated 'H')
-    '1d': '1D',       # 1 day
-    '1w': '1W',       # 1 week
-    '1M': '1M',       # 1 month
+    '1h': '1H',       # 1 hour (corrected to pandas standard)
+    '4h': '4H',       # 4 hours (corrected to pandas standard)
+    '1d': 'D',        # 1 day (corrected to pandas standard)
+    '1w': 'W',        # 1 week (corrected to pandas standard)
+    '1mo': 'MS',      # 1 month start (for yfinance monthly data)
+    '1wk': 'W',       # 1 week (for yfinance weekly data)
+    '1M': 'MS',       # 1 month (legacy support)
 }
 
 def create_darts_timeseries(df: pd.DataFrame, freq: str | None = None) -> 'TimeSeries | None':
@@ -400,15 +403,15 @@ def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30, freq
             # Ensure timezone-naive index
             if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
                 data.index = data.index.tz_convert('UTC').tz_localize(None)
-            # Don't use asfreq() as it introduces NaN values - pass data directly
+            # Pass original frequency parameter, not pandas_freq, to ARIMA
             return _forecast_arima(data, periods, freq)
         elif model_name == 'ETS':
             data = df.set_index('timestamp')['close']
             # Ensure timezone-naive index
             if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
                 data.index = data.index.tz_convert('UTC').tz_localize(None)
-            # Don't use asfreq() as it introduces NaN values - pass data directly
-            return _forecast_ets(data, periods, freq)
+            # Pass pandas frequency to ETS for proper seasonal period calculation
+            return _forecast_ets(data, periods, pandas_freq)
         elif model_name in ['LSTM', 'RNN', 'GRU']:
             return _forecast_rnn(df, periods, freq, model_type=model_name)
         elif model_name == 'NBEATS':
@@ -454,15 +457,15 @@ def _forecast_prophet(df: pd.DataFrame, periods: int, freq: str) -> pd.DataFrame
 
     model.fit(prophet_df)
 
-    # Create future dataframe with correct frequency  
+    # Create future dataframe with correct frequency
     future = model.make_future_dataframe(periods=periods, freq=freq)
     forecast = model.predict(future)
-    
+
     # Return only future forecasts, not historical + future combined
     # Get the last historical timestamp to filter future predictions
     last_historical_ts = prophet_df['ds'].max()
     future_forecast = forecast[forecast['ds'] > last_historical_ts]
-    
+
     # If no future data (edge case), return the last prediction
     if future_forecast.empty:
         future_forecast = forecast.tail(periods) if len(forecast) >= periods else forecast.tail(1)
@@ -470,30 +473,56 @@ def _forecast_prophet(df: pd.DataFrame, periods: int, freq: str) -> pd.DataFrame
     return future_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
 def _forecast_arima(data: pd.Series, periods: int, freq: str) -> pd.DataFrame:
-    """Generate forecast using ARIMA model with auto-order selection."""
+    """Generate forecast using ARIMA model with proper frequency handling."""
     from statsmodels.tsa.stattools import adfuller
-    
+
     # Data validation and cleaning
     if data.empty:
         raise ValueError("Empty data series provided to ARIMA model")
-    
+
     # Remove any infinite values and NaN values
     original_length = len(data)
     data = data.replace([np.inf, -np.inf], np.nan).dropna()
-    
+
     if data.empty:
         raise ValueError("No valid data points after removing inf/NaN values")
-    
+
     if len(data) < 10:
         raise ValueError(f"Insufficient data for ARIMA modeling: {len(data)} points (minimum 10 required)")
-    
+
     if len(data) < original_length:
         logger.warning(f"Removed {original_length - len(data)} invalid data points for ARIMA modeling")
+
+    # Ensure proper frequency is set on the index - CRITICAL for statsmodels
+    if isinstance(data.index, pd.DatetimeIndex):
+        # Convert freq string to proper pandas frequency
+        pandas_freq = TIMEFRAME_TO_FREQ.get(freq, freq)
+
+        # Set frequency on the index if not already set
+        if data.index.freq is None:
+            try:
+                # Try to set frequency using asfreq
+                data = data.asfreq(pandas_freq)
+                logger.info(f"Set index frequency to {pandas_freq} for ARIMA model")
+            except ValueError:
+                # If direct setting fails, infer and resample if necessary
+                datetime_index = pd.to_datetime(data.index)
+                inferred_freq = pd.infer_freq(datetime_index)
+                if inferred_freq is None:
+                    # As last resort, resample to ensure regular frequency
+                    logger.warning(f"Could not infer frequency, resampling to {pandas_freq}")
+                    data = data.resample(pandas_freq).last().dropna()
+                else:
+                    data = data.asfreq(inferred_freq)
+                    logger.info(f"Using inferred frequency: {inferred_freq}")
+        else:
+            logger.info(f"Index already has frequency: {data.index.freq}")
 
     # Test stationarity and determine integration order
     try:
         adf_result = adfuller(data)
         integration_order = 1 if adf_result[1] > 0.05 else 0
+        logger.info(f"ADF test p-value: {adf_result[1]:.4f}, integration order: {integration_order}")
     except Exception as e:
         logger.warning(f"Stationarity test failed: {e}, using integration order 1")
         integration_order = 1
@@ -502,23 +531,29 @@ def _forecast_arima(data: pd.Series, periods: int, freq: str) -> pd.DataFrame:
     best_aic = float('inf')
     best_order = (1, integration_order, 1)
 
-    # Test different ARIMA configurations
-    for p in range(0, 4):
-        for q in range(0, 4):
+    # Test different ARIMA configurations with convergence safeguards
+    for p in range(0, min(4, len(data)//5)):  # Limit p based on data length
+        for q in range(0, min(4, len(data)//5)):  # Limit q based on data length
             try:
                 temp_model = ARIMA(data, order=(p, integration_order, q))
-                temp_fitted = temp_model.fit()
-                if temp_fitted.aic < best_aic:
+                temp_fitted = temp_model.fit(method_kwargs={'warn_convergence': False})
+                if temp_fitted.aic < best_aic and not np.isnan(temp_fitted.aic):
                     best_aic = temp_fitted.aic
                     best_order = (p, integration_order, q)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"ARIMA({p},{integration_order},{q}) failed: {e}")
                 continue
 
     # Fit final model with best order
-    model = ARIMA(data, order=best_order)
-    fitted_model = model.fit()
-
-    logger.info(f"ARIMA order selected: {best_order}, AIC: {fitted_model.aic:.2f}")
+    try:
+        model = ARIMA(data, order=best_order)
+        fitted_model = model.fit(method_kwargs={'warn_convergence': False})
+        logger.info(f"ARIMA order selected: {best_order}, AIC: {fitted_model.aic:.2f}")
+    except Exception as e:
+        # Fallback to simplest stable model
+        logger.warning(f"Best model failed, using fallback ARIMA(1,1,0): {e}")
+        model = ARIMA(data, order=(1, 1, 0))
+        fitted_model = model.fit(method_kwargs={'warn_convergence': False})
 
     # Generate forecast
     forecast_result = fitted_model.get_forecast(steps=periods)
@@ -526,25 +561,75 @@ def _forecast_arima(data: pd.Series, periods: int, freq: str) -> pd.DataFrame:
 
     # Generate future dates with proper frequency handling
     last_date = data.index.max()
+    pandas_freq = TIMEFRAME_TO_FREQ.get(freq, freq)
 
-    # Convert frequency string to proper timedelta
-    freq_map = {
-        '1T': pd.Timedelta(minutes=1),
-        '5T': pd.Timedelta(minutes=5),
-        '15T': pd.Timedelta(minutes=15),
-        '30T': pd.Timedelta(minutes=30),
-        '1H': pd.Timedelta(hours=1),
-        '4H': pd.Timedelta(hours=4),
-        '1D': pd.Timedelta(days=1),
-        '1W': pd.Timedelta(weeks=1)
-    }
+    try:
+        # Map pandas_freq to valid Timedelta unit
+        freq_unit_map = {
+            'min': 'm',
+            '1min': 'm',
+            '5min': 'm',
+            '15min': 'm',
+            '30min': 'm',
+            'H': 'h',
+            '1H': 'h',
+            '4H': 'h',
+            'D': 'd',
+            '1D': 'd',
+            'W': 'w',
+            '1W': 'w',
+            'MS': 'd',  # Approximate month as days
+        }
+        # Extract the numeric multiplier (e.g., 5 from '5min')
+        import re
+        match = re.match(r"(\d+)?([a-zA-Z]+)", pandas_freq)
+        if match:
+            num = int(match.group(1)) if match.group(1) else 1
+            # Always map to a valid pandas Timedelta unit
+            unit = freq_unit_map.get(match.group(2), 'd')
+        else:
+            num = 1
+            unit = 'd'
+        # Ensure unit is a valid literal for pandas Timedelta
+        valid_units = {'m', 'h', 'd', 'w'}
+        if unit not in valid_units:
+            unit = 'd'
+        # Map unit to valid pd.Timedelta keyword argument
+        timedelta_kwargs = {}
+        if unit == 'm':
+            timedelta_kwargs['minutes'] = num
+        elif unit == 'h':
+            timedelta_kwargs['hours'] = num
+        elif unit == 'd':
+            timedelta_kwargs['days'] = num
+        elif unit == 'w':
+            timedelta_kwargs['weeks'] = num
+        else:
+            timedelta_kwargs['days'] = num  # Default fallback
 
-    time_delta = freq_map.get(freq, pd.Timedelta(days=1))
-    future_dates = pd.date_range(
-        start=last_date + time_delta,
-        periods=periods,
-        freq=freq
-    )
+        future_dates = pd.date_range(
+            start=last_date + pd.Timedelta(**timedelta_kwargs),
+            periods=periods,
+            freq=pandas_freq
+        )
+    except Exception:
+        # Fallback to simple time delta approach
+        time_delta_map = {
+            'min': pd.Timedelta(minutes=1),
+            '1min': pd.Timedelta(minutes=1),
+            '5min': pd.Timedelta(minutes=5),
+            '15min': pd.Timedelta(minutes=15),
+            '30min': pd.Timedelta(minutes=30),
+            'H': pd.Timedelta(hours=1),
+            '1H': pd.Timedelta(hours=1),
+            '4H': pd.Timedelta(hours=4),
+            'D': pd.Timedelta(days=1),
+            'W': pd.Timedelta(weeks=1),
+            'MS': pd.Timedelta(days=30)  # Approximate month
+        }
+
+        time_delta = time_delta_map.get(pandas_freq, pd.Timedelta(days=1))
+        future_dates = [last_date + time_delta * (i + 1) for i in range(periods)]
 
     forecast_df = forecast_df.reset_index(drop=True)
     forecast_df['ds'] = future_dates

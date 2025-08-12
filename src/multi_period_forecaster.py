@@ -71,14 +71,20 @@ class MultiPeriodForecaster:
                     
                     # For all periods, calculate period-over-period changes
                     if len(df) > 1:
-                        # Period open is the opening price of each period
-                        df['period_open'] = df['open']
-                        df['period_close'] = df['close']
+                        # For multi-period analysis: period_open should be the earliest open price
+                        # and period_close should be the latest close price across the entire dataset
+                        earliest_open = df['open'].iloc[0]  # First/earliest opening price
+                        latest_close = df['close'].iloc[-1]  # Last/latest closing price
                         
-                        # Calculate period change (close vs open of same period)
-                        df['period_change'] = ((df['close'] - df['open']) / df['open'] * 100).round(2)
+                        # Set period_open and period_close for the entire range analysis
+                        df['period_open'] = earliest_open  # Same for all rows - represents dataset start
+                        df['period_close'] = latest_close  # Same for all rows - represents dataset end
                         
-                        # Calculate period-to-period change (close vs previous close)
+                        # Calculate total period change (from earliest open to latest close)
+                        total_period_change = ((latest_close - earliest_open) / earliest_open * 100)
+                        df['period_change'] = round(total_period_change, 2)  # Same for all rows
+                        
+                        # Keep individual period-to-period changes (this logic was correct)
                         df['period_to_period_change'] = df['close'].pct_change() * 100
                         df['period_to_period_change'] = df['period_to_period_change'].round(2)
                         

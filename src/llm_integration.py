@@ -85,19 +85,19 @@ def get_multi_period_ai_analysis(
         if hist is None or fc is None or hist.empty or fc.empty:
             continue
         last_price = hist['close'].iloc[-1]
-        
+
         # Fix timezone comparison issue - normalize both to timezone-naive UTC
         hist_timestamps = pd.to_datetime(hist['timestamp'])
         if hist_timestamps.dt.tz is not None:
             hist_timestamps = hist_timestamps.dt.tz_convert('UTC').dt.tz_localize(None)
         last_hist_ts = hist_timestamps.max()
-        
+
         fcf = fc.copy()
         fcf['ds'] = pd.to_datetime(fcf['ds'], errors='coerce')
         # Ensure forecast timestamps are also timezone-naive UTC
         if fcf['ds'].dt.tz is not None:
             fcf['ds'] = fcf['ds'].dt.tz_convert('UTC').dt.tz_localize(None)
-        
+
         # Now both are timezone-naive UTC - safe to compare
         fut = fcf[fcf['ds'] > last_hist_ts]
         if fut.empty:
@@ -353,13 +353,8 @@ def _create_enhanced_prompt(context: dict[str, Any]) -> str:
     return prompt
 
 def _call_llm_api(prompt: str) -> str:
-    """Call the LLM API with enhanced error handling and connectivity checks."""
-    
-    # Pre-flight connectivity check
-    connectivity_check = _check_lm_studio_connectivity()
-    if not connectivity_check['available']:
-        return _generate_fallback_analysis(connectivity_check['error'])
-    
+    """Call the LLM API with transparent error handling."""
+
     headers = {"Content-Type": "application/json"}
     payload = {
         "model": "local-model",
@@ -372,36 +367,36 @@ def _call_llm_api(prompt: str) -> str:
     }
 
     try:
-        response = requests.post(LM_STUDIO_API_URL, headers=headers, json=payload, timeout=60)
+        response = requests.post(LM_STUDIO_API_URL, headers=headers, json=payload)
         response.raise_for_status()
 
         result = response.json()
-        
+
         # Enhanced response validation
         if 'choices' not in result or not result['choices']:
             raise ValueError("Invalid API response: no choices returned")
-        
+
         if 'message' not in result['choices'][0] or 'content' not in result['choices'][0]['message']:
             raise ValueError("Invalid API response: no content in message")
-        
+
         ai_response = result['choices'][0]['message']['content']
-        
+
         # Validate response quality
         if not ai_response or len(ai_response.strip()) < 50:
             logger.warning("LLM returned very short response, may indicate an issue")
             return ai_response + "\n\n⚠️ *Note: LLM response was unusually short*"
-        
+
         return ai_response
 
     except requests.exceptions.ConnectionError:
         error_msg = "Cannot connect to LM Studio. Please ensure LM Studio is running on localhost:1234"
         logger.error(error_msg)
-        return _generate_fallback_analysis(error_msg)
+        raise ConnectionError(error_msg)
 
     except requests.exceptions.Timeout:
-        error_msg = "LM Studio request timed out (60s). The model may be overloaded"
+        error_msg = "LM Studio request timed out (30s). The model may be overloaded"
         logger.error(error_msg)
-        return _generate_fallback_analysis(error_msg)
+        raise TimeoutError(error_msg)
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
@@ -411,33 +406,33 @@ def _call_llm_api(prompt: str) -> str:
         else:
             error_msg = f"LM Studio HTTP error: {e.response.status_code}"
         logger.error(error_msg)
-        return _generate_fallback_analysis(error_msg)
+        raise ConnectionError(error_msg)
 
     except (KeyError, IndexError, ValueError) as e:
         error_msg = f"Invalid LLM response format: {e}"
         logger.error(error_msg)
-        return _generate_fallback_analysis(error_msg)
+        raise ValueError(error_msg)
 
     except Exception as e:
         error_msg = f"Unexpected LLM error: {e}"
         logger.error(error_msg, exc_info=True)
-        return _generate_fallback_analysis(error_msg)
+        raise RuntimeError(error_msg)
 
 
 def _check_lm_studio_connectivity() -> Dict[str, Any]:
     """Check if LM Studio is accessible with quick health check.
-    
+
     Returns:
         dict: {'available': bool, 'error': str, 'response_time': float}
     """
     import time
-    
+
     start_time = time.time()
     try:
         # Quick health check with minimal payload
         response = requests.get(f"{LM_STUDIO_API_URL.replace('/chat/completions', '/health')}", timeout=5)
         response_time = time.time() - start_time
-        
+
         if response.status_code == 200:
             return {'available': True, 'error': None, 'response_time': response_time}
         else:
@@ -449,12 +444,12 @@ def _check_lm_studio_connectivity() -> Dict[str, Any]:
             }
             response = requests.post(LM_STUDIO_API_URL, json=test_payload, timeout=5)
             response_time = time.time() - start_time
-            
+
             if response.status_code in [200, 400]:  # 400 might be expected for minimal request
                 return {'available': True, 'error': None, 'response_time': response_time}
             else:
                 return {'available': False, 'error': f"HTTP {response.status_code}", 'response_time': response_time}
-                
+
     except requests.exceptions.ConnectionError:
         return {'available': False, 'error': "Connection refused - LM Studio not running", 'response_time': time.time() - start_time}
     except requests.exceptions.Timeout:
@@ -465,10 +460,10 @@ def _check_lm_studio_connectivity() -> Dict[str, Any]:
 
 def _generate_fallback_analysis(error_reason: str) -> str:
     """Generate a basic technical analysis when LLM is unavailable.
-    
+
     Args:
         error_reason: Reason why LLM is unavailable
-        
+
     Returns:
         str: Fallback analysis with technical indicators
     """
