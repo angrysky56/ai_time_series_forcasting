@@ -2,6 +2,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
+import numpy as np
 
 from src.data_fetcher import (
     fetch_universal_data,
@@ -119,10 +120,36 @@ if use_ai_indicators:
 
 use_auto_select = st.sidebar.checkbox("🎯 Auto-Select Best Model (Walk-Forward)", value=False)
 
-model_name = None  # Ensure model_name is always defined
-models_to_compare = []  # Ensure models_to_compare is always defined
+# Ensemble forecasting options
+use_ensemble = st.sidebar.checkbox("🎪 Use Ensemble Forecasting", value=False, 
+                                 help="Combine multiple models for improved accuracy")
 
-if use_auto_select:
+# Initialize variables with defaults
+model_name = None
+models_to_compare = []
+ensemble_models = []
+ensemble_method = 'weighted_average'
+
+if use_ensemble:
+    st.sidebar.info("🎯 Ensemble combines multiple models for better accuracy")
+    ensemble_models = st.sidebar.multiselect(
+        "Ensemble Models",
+        ['Prophet', 'ARIMA', 'ETS', 'LSTM', 'NBEATS'],
+        default=['Prophet', 'ARIMA', 'ETS'],
+        help="Select models to include in ensemble"
+    )
+    
+    ensemble_method = st.sidebar.selectbox(
+        "Ensemble Method",
+        ['weighted_average', 'median', 'bayesian'],
+        help="Method for combining model predictions"
+    )
+    
+    if len(ensemble_models) < 2:
+        st.sidebar.error("⚠️ Ensemble requires at least 2 models")
+        use_ensemble = False
+    
+elif use_auto_select:
     models_to_compare = st.sidebar.multiselect(
         "Models to Compare",
         ['Prophet', 'ARIMA', 'ETS'],
@@ -173,9 +200,16 @@ if start_button:
 
     with header_col1:
         if analysis_mode == "Multi-Period Coherent":
-            st.header(f"📊 Multi-Period Analysis for {symbol}")
+            if use_ensemble:
+                st.header(f"🎪 Multi-Period Ensemble Analysis for {symbol}")
+                st.caption(f"Using {len(ensemble_models)}-model ensemble with {ensemble_method} method")
+            else:
+                st.header(f"📊 Multi-Period Analysis for {symbol}")
         else:
-            if use_auto_select:
+            if use_ensemble:
+                st.header(f"🎪 Ensemble Analysis for {symbol}")
+                st.caption(f"Using {len(ensemble_models)}-model ensemble with {ensemble_method} method")
+            elif use_auto_select:
                 st.header(f"📊 Auto-Selected Analysis for {symbol}")
             else:
                 st.header(f"📊 Analysis for {symbol} using {model_name}")
@@ -279,10 +313,19 @@ if start_button:
                 model_to_use = model_name
 
             with st.spinner("Generating multi-period forecasts..."):
-                forecasts = forecaster.generate_multi_period_forecasts(
-                    multi_data,
-                    model_name=model_to_use
-                )
+                if use_ensemble:
+                    forecasts = forecaster.generate_multi_period_forecasts(
+                        multi_data,
+                        model_name='Prophet',  # Default for fallback
+                        use_ensemble=True,
+                        ensemble_models=ensemble_models,
+                        ensemble_method=ensemble_method
+                    )
+                else:
+                    forecasts = forecaster.generate_multi_period_forecasts(
+                        multi_data,
+                        model_name=model_to_use
+                    )
 
             if forecasts:
                 st.success(f"✅ Generated forecasts for {len(forecasts)} timeframes")
@@ -310,6 +353,44 @@ if start_button:
                             st.warning("🟡 Moderate consistency - Mixed signals")
                         else:
                             st.error("🔴 Low consistency - Conflicting signals")
+
+                # Display ensemble performance if ensemble was used
+                if use_ensemble and hasattr(forecaster, 'ensemble_info') and forecaster.ensemble_info:
+                    st.subheader("🎪 Ensemble Performance Analysis")
+                    
+                    ensemble_performance = forecaster.ensemble_info.get('performance', {})
+                    if ensemble_performance:
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.write("**Model Weights:**")
+                            for model_name, perf in ensemble_performance.items():
+                                if isinstance(perf, dict):
+                                    weight = perf.get('weight', 0)
+                                    st.write(f"{model_name}: {weight:.3f}")
+                        
+                        with col2:
+                            st.write("**Model Performance (RMSE):**")
+                            for model_name, perf in ensemble_performance.items():
+                                if isinstance(perf, dict):
+                                    rmse = perf.get('rmse', 0)
+                                    st.write(f"{model_name}: {rmse:.6f}")
+                        
+                        with col3:
+                            method = forecaster.ensemble_info.get('method', ensemble_method)
+                            st.metric("Ensemble Method", method.replace('_', ' ').title())
+                            
+                            # Calculate ensemble diversity
+                            weights = [perf.get('weight', 0) for perf in ensemble_performance.values() 
+                                     if isinstance(perf, dict)]
+                            if weights:
+                                weight_entropy = -sum(w * np.log(w + 1e-10) for w in weights if w > 0)
+                                max_entropy = np.log(len(weights))
+                                diversity = weight_entropy / max_entropy if max_entropy > 0 else 0
+                                st.metric("Model Diversity", f"{diversity:.3f}", help="Higher values indicate more balanced ensemble")
+                    
+                    # Show ensemble insights
+                    st.info("💡 **Ensemble Insights**: The model weights are automatically adjusted based on recent performance. Higher weights indicate better recent accuracy for each model.")
 
                 # Generate coherent report
                 with st.spinner("Generating coherent analysis report..."):
