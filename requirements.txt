@@ -1,18 +1,22 @@
 streamlit>=1.48.0
 pandas>=2.3.1
-ccxt>=4.4.99
+yfinance>=0.2.12
 prophet>=1.1.7
 plotly>=6.2.0
 requests>=2.32.4
 statsmodels>=0.14.5
 scikit-learn>=1.7.1
 numpy>=1.24.0
-darts>=0.30.0
-pytorch-lightning>=2.0.0
-torch>=2.0.0
-talipp>=2.6.0
+ta-lib>=0.4.28
 xgboost>=2.0.0
 lightgbm>=4.0.0
 optuna>=4.4.0
-neuralprophet>=0.8.0
-tensorflow>=2.19.0
+
+# Removed dependencies that aren't essential:
+# ccxt>=4.4.99              # Crypto exchange library - not needed with yfinance only
+# darts>=0.30.0             # Heavy ML library - using simpler models
+# pytorch-lightning>=2.0.0  # Deep learning - not essential for basic forecasting
+# torch>=2.0.0              # PyTorch - too heavy for basic use
+# talipp>=2.6.0             # Crypto specific - not needed
+# neuralprophet>=0.8.0      # Prophet extension - keeping base Prophet
+# tensorflow>=2.19.0        # TensorFlow - too heavy for basic forecasting

@@ -9,13 +9,13 @@ from typing import Any
 import logging
 from talipp.indicators import (
     SMA, EMA, WMA, DEMA, TEMA, T3, KAMA, McGinleyDynamic,
-    RSI, MACD, Stoch, StochRSI,
+    RSI, StochRSI,
     BB, KeltnerChannels, DonchianChannels,
     ATR, NATR, CHOP,
     OBV, VWAP, KVO,
     ADX, Aroon, VTX,
     CCI, TSI, UO,
-    AO, DPO, KST, ROC, TRIX
+    AO, ROC
 )
 from talipp.ohlcv import OHLCVFactory
 import optuna

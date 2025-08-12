@@ -1,6 +1,6 @@
 import requests
 import pandas as pd
-from typing import Any
+from typing import Any, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,8 @@ def get_ai_analysis(
     model_name: str | None = None,
     validation_results: dict[str, Any] | None = None,
     technical_indicators: dict[str, Any] | None = None,
-    exchange_info: dict[str, Any] | None = None
+    exchange_info: dict[str, Any] | None = None,
+    market_context: dict[str, Any] | None = None
 ) -> str:
     """
     Generates comprehensive AI analysis using all available data.
@@ -28,6 +29,7 @@ def get_ai_analysis(
         validation_results (dict): Walk-forward validation results.
         technical_indicators (dict): Technical indicator values.
         exchange_info (dict): Exchange and timeframe information.
+        market_context (dict): Market indicators, correlations, and regime analysis.
 
     Returns:
         str: Comprehensive AI-generated analysis.
@@ -35,22 +37,127 @@ def get_ai_analysis(
     if forecast_data is None or forecast_data.empty or historical_data is None or historical_data.empty:
         return "Insufficient data for AI analysis."
 
-    # Extract basic forecast metrics
+    # Extract basic forecast metrics (use only true future horizon)
     last_known_price = historical_data['close'].iloc[-1]
-    forecast_end_price = forecast_data['yhat'].iloc[-1]
-    forecast_period = len(forecast_data) - len(historical_data)
+    last_hist_ts = pd.Timestamp(pd.to_datetime(historical_data['timestamp']).max())
+    # Ensure 'ds' is datetime
+    forecast_df = forecast_data.copy()
+    forecast_df['ds'] = pd.to_datetime(forecast_df['ds'], errors='coerce')
+    future_mask = forecast_df['ds'] > last_hist_ts
+    future_forecast = forecast_df[future_mask]
+    if future_forecast.empty:
+        # Fallback: use tail(1) if future mask fails (e.g., models that only return future are fine too)
+        future_forecast = forecast_df.tail(1)
+
+    forecast_end_price = future_forecast['yhat'].iloc[-1]
+    forecast_period = len(future_forecast)
     percentage_change = ((forecast_end_price - last_known_price) / last_known_price) * 100
 
     # Build comprehensive analysis context
     analysis_context = _build_analysis_context(
         symbol, last_known_price, forecast_end_price, percentage_change, forecast_period,
-        model_name, validation_results, technical_indicators, exchange_info, historical_data
+        model_name, validation_results, technical_indicators, exchange_info, historical_data, market_context
     )
 
     # Generate enhanced prompt
     prompt = _create_enhanced_prompt(analysis_context)
 
     # Call LLM API
+    return _call_llm_api(prompt)
+
+def get_multi_period_ai_analysis(
+    symbol: str,
+    multi_historical: dict[str, pd.DataFrame],
+    multi_forecasts: dict[str, pd.DataFrame],
+    report: dict[str, Any],
+    exchange_info: dict[str, Any] | None = None
+) -> str:
+    """Generate an AI narrative for multi-period coherent analysis.
+
+    Summarizes trends across monthly/weekly/daily/hourly, includes consistency scores
+    and volatility, then requests a cohesive interpretation and recommendations.
+    """
+    # Build a compact summary table per timeframe
+    tf_summaries: list[str] = []
+    for tf in ['monthly', 'weekly', 'daily', 'hourly']:
+        hist = multi_historical.get(tf)
+        fc = multi_forecasts.get(tf)
+        if hist is None or fc is None or hist.empty or fc.empty:
+            continue
+        last_price = hist['close'].iloc[-1]
+        
+        # Fix timezone comparison issue - normalize both to timezone-naive UTC
+        hist_timestamps = pd.to_datetime(hist['timestamp'])
+        if hist_timestamps.dt.tz is not None:
+            hist_timestamps = hist_timestamps.dt.tz_convert('UTC').dt.tz_localize(None)
+        last_hist_ts = hist_timestamps.max()
+        
+        fcf = fc.copy()
+        fcf['ds'] = pd.to_datetime(fcf['ds'], errors='coerce')
+        # Ensure forecast timestamps are also timezone-naive UTC
+        if fcf['ds'].dt.tz is not None:
+            fcf['ds'] = fcf['ds'].dt.tz_convert('UTC').dt.tz_localize(None)
+        
+        # Now both are timezone-naive UTC - safe to compare
+        fut = fcf[fcf['ds'] > last_hist_ts]
+        if fut.empty:
+            fut = fcf.tail(1)
+        end_price = fut['yhat'].iloc[-1]
+        change_pct = (end_price - last_price) / last_price * 100 if last_price else 0
+        tf_summaries.append(f"- {tf.title()}: last={last_price:,.2f}, forecast_end={end_price:,.2f}, change={change_pct:+.2f}% ({len(fut)} steps)")
+
+    # Pull key pieces from the coherent report
+    summary = report.get('summary', {}) if isinstance(report, dict) else {}
+    trends = summary.get('trend_direction', {})
+    vol = summary.get('volatility', {})
+    consistency = report.get('consistency_scores', {}) if isinstance(report, dict) else {}
+    overall_consistency = consistency.get('overall', None)
+
+    # Create a focused prompt
+    details = "\n".join(tf_summaries) if tf_summaries else "(no timeframe summaries available)"
+    trend_lines = []
+    for tf, info in trends.items():
+        if isinstance(info, dict) and 'direction' in info and 'change_percent' in info:
+            arrow = '📈' if info['direction'] == 'up' else '📉'
+            trend_lines.append(f"  • {tf.title()}: {arrow} {info['change_percent']:+.2f}%")
+    trend_block = "\n".join(trend_lines) if trend_lines else "  • Not available"
+
+    vol_lines = []
+    for tf, v in vol.items():
+        vol_lines.append(f"  • {tf.title()}: {v:.2f}%")
+    vol_block = "\n".join(vol_lines) if vol_lines else "  • Not available"
+
+    exch_block = ""
+    if exchange_info:
+        exch_block = f"Exchange: {exchange_info.get('exchange', 'Unknown')} | Timeframe: multi | Data completeness varies by tf."
+
+    prompt = f"""
+    Act as a senior market strategist. Provide a cohesive, multi-timeframe narrative for {symbol} using the details below.
+
+    TIMEFRAME SNAPSHOTS (last price vs forecast end):
+    {details}
+
+    TRENDS BY TIMEFRAME:
+    {trend_block}
+
+    VOLATILITY ESTIMATES (avg CI width / mean):
+    {vol_block}
+
+    CONSISTENCY SCORES:
+      • Monthly vs Weekly: {consistency.get('monthly_vs_weekly', 'n/a')}
+      • Weekly vs Daily: {consistency.get('weekly_vs_daily', 'n/a')}
+      • Daily vs Hourly: {consistency.get('daily_vs_hourly', 'n/a')}
+      • Overall: {overall_consistency if overall_consistency is not None else 'n/a'}
+
+    {exch_block}
+
+    Requirements:
+    - Synthesize a clear story across horizons (long/medium/short).
+    - Reconcile disagreements (if any) and indicate confidence based on consistency.
+    - Highlight risks/opportunities and actionable timeframes for entries/exits.
+    - Keep it concise and structured with bullet points where helpful.
+    """
+
     return _call_llm_api(prompt)
 
 def _build_analysis_context(
@@ -63,7 +170,8 @@ def _build_analysis_context(
     validation_results: dict[str, Any] | None,
     technical_indicators: dict[str, Any] | None,
     exchange_info: dict[str, Any] | None,
-    historical_data: pd.DataFrame
+    historical_data: pd.DataFrame,
+    market_context: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Build comprehensive context for AI analysis."""
 
@@ -110,6 +218,16 @@ def _build_analysis_context(
     if exchange_info:
         context['market_context'] = exchange_info
 
+    # Add broader market context if available
+    if market_context:
+        context['broader_market_analysis'] = {
+            'correlations': market_context.get('correlations', {}),
+            'market_regime': market_context.get('market_regime', {}),
+            'insights': market_context.get('insights', []),
+            'risk_factors': market_context.get('risk_factors', []),
+            'opportunities': market_context.get('opportunities', [])
+        }
+
     return context
 
 def _calculate_reliability_score(metrics: dict[str, Any]) -> str:
@@ -137,6 +255,7 @@ def _create_enhanced_prompt(context: dict[str, Any]) -> str:
     performance = context.get('model_performance')
     technical = context.get('technical_analysis')
     market = context.get('market_context')
+    broader_market = context.get('broader_market_analysis')
 
     prompt = f"""
     Act as a professional cryptocurrency analyst providing comprehensive market analysis.
@@ -183,6 +302,36 @@ def _create_enhanced_prompt(context: dict[str, Any]) -> str:
     - Data Points: {market.get('data_points', 0)}
     """
 
+    if broader_market:
+        prompt += """
+
+    BROADER MARKET ANALYSIS:
+    """
+        regime = broader_market.get('market_regime', {})
+        if regime:
+            prompt += f"- Market Regime: {regime.get('regime_type', 'unknown').replace('_', ' ').title()}\n    "
+            prompt += f"- Risk Level: {regime.get('risk_level', 'unknown').title()}\n    "
+            prompt += f"- Volatility State: {regime.get('volatility_state', 'unknown').title()}\n    "
+            prompt += f"- Trend Direction: {regime.get('trend_direction', 'unknown').title()}\n    "
+
+        correlations = broader_market.get('correlations', {})
+        if correlations:
+            prompt += "- Key Correlations:\n    "
+            for indicator, corr in list(correlations.items())[:3]:
+                prompt += f"  • {indicator}: {corr:+.3f}\n    "
+
+        insights = broader_market.get('insights', [])
+        if insights:
+            prompt += "- Market Insights:\n    "
+            for insight in insights[:3]:
+                prompt += f"  • {insight}\n    "
+
+        risks = broader_market.get('risk_factors', [])
+        if risks:
+            prompt += "- Risk Factors:\n    "
+            for risk in risks[:2]:
+                prompt += f"  • {risk}\n    "
+
     prompt += """
 
     ANALYSIS REQUIREMENTS:
@@ -204,7 +353,13 @@ def _create_enhanced_prompt(context: dict[str, Any]) -> str:
     return prompt
 
 def _call_llm_api(prompt: str) -> str:
-    """Call the LLM API with error handling."""
+    """Call the LLM API with enhanced error handling and connectivity checks."""
+    
+    # Pre-flight connectivity check
+    connectivity_check = _check_lm_studio_connectivity()
+    if not connectivity_check['available']:
+        return _generate_fallback_analysis(connectivity_check['error'])
+    
     headers = {"Content-Type": "application/json"}
     payload = {
         "model": "local-model",
@@ -217,24 +372,133 @@ def _call_llm_api(prompt: str) -> str:
     }
 
     try:
-        response = requests.post(LM_STUDIO_API_URL, headers=headers, json=payload, timeout=120)
+        response = requests.post(LM_STUDIO_API_URL, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
 
         result = response.json()
+        
+        # Enhanced response validation
+        if 'choices' not in result or not result['choices']:
+            raise ValueError("Invalid API response: no choices returned")
+        
+        if 'message' not in result['choices'][0] or 'content' not in result['choices'][0]['message']:
+            raise ValueError("Invalid API response: no content in message")
+        
         ai_response = result['choices'][0]['message']['content']
+        
+        # Validate response quality
+        if not ai_response or len(ai_response.strip()) < 50:
+            logger.warning("LLM returned very short response, may indicate an issue")
+            return ai_response + "\n\n⚠️ *Note: LLM response was unusually short*"
+        
         return ai_response
 
-    except requests.exceptions.RequestException as e:
-        error_msg = f"LLM API Connection Error: {e}"
+    except requests.exceptions.ConnectionError:
+        error_msg = "Cannot connect to LM Studio. Please ensure LM Studio is running on localhost:1234"
         logger.error(error_msg)
-        return f"**API Connection Failed**: {error_msg}\n\nPlease ensure LM Studio is running and accessible at {LM_STUDIO_API_URL}"
+        return _generate_fallback_analysis(error_msg)
 
-    except (KeyError, IndexError) as e:
-        error_msg = f"LLM API Response Error: {e}"
+    except requests.exceptions.Timeout:
+        error_msg = "LM Studio request timed out (60s). The model may be overloaded"
         logger.error(error_msg)
-        return f"**API Response Error**: {error_msg}\n\nThe LLM response format may have changed."
+        return _generate_fallback_analysis(error_msg)
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            error_msg = "LM Studio endpoint not found. Check if the local server is properly configured"
+        elif e.response.status_code == 500:
+            error_msg = "LM Studio internal error. Try restarting the model or checking model compatibility"
+        else:
+            error_msg = f"LM Studio HTTP error: {e.response.status_code}"
+        logger.error(error_msg)
+        return _generate_fallback_analysis(error_msg)
+
+    except (KeyError, IndexError, ValueError) as e:
+        error_msg = f"Invalid LLM response format: {e}"
+        logger.error(error_msg)
+        return _generate_fallback_analysis(error_msg)
 
     except Exception as e:
-        error_msg = f"Unexpected LLM Error: {e}"
-        logger.error(error_msg)
-        return f"**Analysis Error**: {error_msg}"
+        error_msg = f"Unexpected LLM error: {e}"
+        logger.error(error_msg, exc_info=True)
+        return _generate_fallback_analysis(error_msg)
+
+
+def _check_lm_studio_connectivity() -> Dict[str, Any]:
+    """Check if LM Studio is accessible with quick health check.
+    
+    Returns:
+        dict: {'available': bool, 'error': str, 'response_time': float}
+    """
+    import time
+    
+    start_time = time.time()
+    try:
+        # Quick health check with minimal payload
+        response = requests.get(f"{LM_STUDIO_API_URL.replace('/chat/completions', '/health')}", timeout=5)
+        response_time = time.time() - start_time
+        
+        if response.status_code == 200:
+            return {'available': True, 'error': None, 'response_time': response_time}
+        else:
+            # Try the main endpoint with a minimal request
+            test_payload = {
+                "model": "local-model",
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1
+            }
+            response = requests.post(LM_STUDIO_API_URL, json=test_payload, timeout=5)
+            response_time = time.time() - start_time
+            
+            if response.status_code in [200, 400]:  # 400 might be expected for minimal request
+                return {'available': True, 'error': None, 'response_time': response_time}
+            else:
+                return {'available': False, 'error': f"HTTP {response.status_code}", 'response_time': response_time}
+                
+    except requests.exceptions.ConnectionError:
+        return {'available': False, 'error': "Connection refused - LM Studio not running", 'response_time': time.time() - start_time}
+    except requests.exceptions.Timeout:
+        return {'available': False, 'error': "Health check timeout", 'response_time': time.time() - start_time}
+    except Exception as e:
+        return {'available': False, 'error': str(e), 'response_time': time.time() - start_time}
+
+
+def _generate_fallback_analysis(error_reason: str) -> str:
+    """Generate a basic technical analysis when LLM is unavailable.
+    
+    Args:
+        error_reason: Reason why LLM is unavailable
+        
+    Returns:
+        str: Fallback analysis with technical indicators
+    """
+    return f"""
+## 📊 Technical Analysis (LLM Unavailable)
+
+**🔧 LLM Status**: {error_reason}
+
+### 📈 Forecast Summary
+- **Model Performance**: Based on validation metrics provided
+- **Price Direction**: Review the forecast trend line and confidence intervals
+- **Volatility**: Check the width of confidence bands for risk assessment
+
+### 🛠 Troubleshooting LLM Integration
+1. **Check LM Studio**: Ensure LM Studio is running on localhost:1234
+2. **Model Status**: Verify a model is loaded and responding in LM Studio
+3. **Network**: Check if any firewall is blocking localhost connections
+4. **Memory**: Ensure sufficient RAM for the LLM model
+
+### 📋 Manual Analysis Guidelines
+- **Trend Analysis**: Look at the forecast direction relative to recent price action
+- **Confidence Assessment**: Wider confidence bands indicate higher uncertainty
+- **Technical Indicators**: Review any displayed moving averages, RSI, or other indicators
+- **Market Context**: Consider current market volatility and trading volume
+
+### 💡 Next Steps
+- Restart LM Studio and reload the model
+- Check the LM Studio console for error messages
+- Ensure the model is compatible with the API format
+- Try reducing the analysis complexity if the model is struggling
+
+*Note: This fallback analysis provides basic guidance. For detailed market insights, please resolve the LLM connectivity issue.*
+"""

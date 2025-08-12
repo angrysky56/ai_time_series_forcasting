@@ -1,11 +1,11 @@
 import pandas as pd
+import numpy as np
 from prophet import Prophet
 from statsmodels.tsa.api import ARIMA, ExponentialSmoothing
 import logging
 from typing import cast
 
 # Neural network imports
-
 from darts import TimeSeries
 from darts.models import (
     RNNModel, NBEATSModel, TransformerModel,
@@ -18,6 +18,19 @@ logging.getLogger('prophet').setLevel(logging.ERROR)
 logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
+
+def _to_naive_utc(series: pd.Series) -> pd.Series:
+    """Return a timezone-naive datetime series in UTC.
+
+    - Parses input to pandas datetime
+    - If tz-aware, converts to UTC then drops tz info
+    - If naive, leaves as naive
+    """
+    s = pd.to_datetime(series, errors='coerce')
+    if hasattr(s.dt, 'tz') and s.dt.tz is not None:
+        # Convert any tz to UTC, then drop tz info
+        return s.dt.tz_convert('UTC').dt.tz_localize(None)
+    return s
 
 def _ts_to_pandas_dataframe(ts: TimeSeries) -> pd.DataFrame:
     """Return a pandas DataFrame (time as first column) from a Darts TimeSeries.
@@ -348,42 +361,53 @@ def _forecast_nlinear(df: pd.DataFrame, periods: int, freq: str) -> pd.DataFrame
 
     return forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
-def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30) -> pd.DataFrame | None:
+def generate_forecast(df: pd.DataFrame, model_name: str, periods: int = 30, freq: str = '1d') -> pd.DataFrame | None:
     """Generate a forecast for a given time series.
 
     Args:
         df (pd.DataFrame): The input DataFrame with historical data.
         model_name (str): The name of the model to use.
         periods (int): The number of future periods to forecast.
+        freq (str): The frequency of the data (e.g., '1d', '1h', '4h'). Defaults to '1d'.
 
     Returns:
         pd.DataFrame: A DataFrame containing the forecast data.
     """
 
     try:
-        # Infer frequency from data or use timeframe if available
-        if 'timeframe' in df.columns and not df['timeframe'].empty:
+        # Use passed frequency first, fall back to inference if needed
+        if freq and freq in TIMEFRAME_TO_FREQ:
+            # Use the explicitly passed frequency
+            pandas_freq = TIMEFRAME_TO_FREQ[freq]
+        elif 'timeframe' in df.columns and not df['timeframe'].empty:
+            # Fall back to timeframe column if available
             timeframe = df['timeframe'].iloc[0]
-            freq = TIMEFRAME_TO_FREQ.get(timeframe, infer_frequency_from_data(df))
+            freq = timeframe
+            pandas_freq = TIMEFRAME_TO_FREQ.get(timeframe, infer_frequency_from_data(df))
         else:
+            # Last resort: infer from data
             freq = infer_frequency_from_data(df)
+            pandas_freq = freq
 
-        logger.info(f"Using frequency: {freq} for {model_name} model")
+        logger.info(f"Using frequency: {freq} (pandas: {pandas_freq}) for {model_name} model")
 
         # Route to appropriate model
         if model_name == 'Prophet':
-            return _forecast_prophet(df, periods, freq)
+            # Prophet expects a valid pandas frequency string
+            return _forecast_prophet(df, periods, pandas_freq)
         elif model_name == 'ARIMA':
             data = df.set_index('timestamp')['close']
-            # Set frequency to prevent statsmodels warnings
-            if freq in TIMEFRAME_TO_FREQ:
-                data = data.asfreq(TIMEFRAME_TO_FREQ[freq])
+            # Ensure timezone-naive index
+            if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
+                data.index = data.index.tz_convert('UTC').tz_localize(None)
+            # Don't use asfreq() as it introduces NaN values - pass data directly
             return _forecast_arima(data, periods, freq)
         elif model_name == 'ETS':
             data = df.set_index('timestamp')['close']
-            # Set frequency to prevent statsmodels warnings
-            if freq in TIMEFRAME_TO_FREQ:
-                data = data.asfreq(TIMEFRAME_TO_FREQ[freq])
+            # Ensure timezone-naive index
+            if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
+                data.index = data.index.tz_convert('UTC').tz_localize(None)
+            # Don't use asfreq() as it introduces NaN values - pass data directly
             return _forecast_ets(data, periods, freq)
         elif model_name in ['LSTM', 'RNN', 'GRU']:
             return _forecast_rnn(df, periods, freq, model_type=model_name)
@@ -408,6 +432,8 @@ def _forecast_prophet(df: pd.DataFrame, periods: int, freq: str) -> pd.DataFrame
     """Generate forecast using Prophet model."""
     # Prepare Prophet DataFrame
     prophet_df = df.rename(columns={'timestamp': 'ds', 'close': 'y'})[['ds', 'y']]
+    # Prophet does not support timezone-aware datetimes
+    prophet_df['ds'] = _to_naive_utc(prophet_df['ds'])
 
     # Initialize Prophet model with appropriate parameters
     model = Prophet(
@@ -416,10 +442,10 @@ def _forecast_prophet(df: pd.DataFrame, periods: int, freq: str) -> pd.DataFrame
     )
 
     # Add seasonality based on frequency
-    if freq in ['1T', '5T', '15T', '30T']:  # Minute-level data
+    if freq in ['1T', '5T', '15T', '30T', '1min', '5min', '15min', '30min']:  # Minute-level data
         model.add_seasonality(name='hourly', period=1/24, fourier_order=5)
         model.add_seasonality(name='daily', period=1, fourier_order=10)
-    elif freq in ['1H', '4H']:  # Hourly data
+    elif freq in ['1H', '4H', '1h', '4h']:  # Hourly data
         model.add_seasonality(name='daily', period=1, fourier_order=10)
         model.add_seasonality(name='weekly', period=7, fourier_order=5)
     else:  # Daily or weekly data
@@ -428,19 +454,49 @@ def _forecast_prophet(df: pd.DataFrame, periods: int, freq: str) -> pd.DataFrame
 
     model.fit(prophet_df)
 
-    # Create future dataframe with correct frequency
+    # Create future dataframe with correct frequency  
     future = model.make_future_dataframe(periods=periods, freq=freq)
     forecast = model.predict(future)
+    
+    # Return only future forecasts, not historical + future combined
+    # Get the last historical timestamp to filter future predictions
+    last_historical_ts = prophet_df['ds'].max()
+    future_forecast = forecast[forecast['ds'] > last_historical_ts]
+    
+    # If no future data (edge case), return the last prediction
+    if future_forecast.empty:
+        future_forecast = forecast.tail(periods) if len(forecast) >= periods else forecast.tail(1)
 
-    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+    return future_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
 def _forecast_arima(data: pd.Series, periods: int, freq: str) -> pd.DataFrame:
     """Generate forecast using ARIMA model with auto-order selection."""
     from statsmodels.tsa.stattools import adfuller
+    
+    # Data validation and cleaning
+    if data.empty:
+        raise ValueError("Empty data series provided to ARIMA model")
+    
+    # Remove any infinite values and NaN values
+    original_length = len(data)
+    data = data.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if data.empty:
+        raise ValueError("No valid data points after removing inf/NaN values")
+    
+    if len(data) < 10:
+        raise ValueError(f"Insufficient data for ARIMA modeling: {len(data)} points (minimum 10 required)")
+    
+    if len(data) < original_length:
+        logger.warning(f"Removed {original_length - len(data)} invalid data points for ARIMA modeling")
 
     # Test stationarity and determine integration order
-    adf_result = adfuller(data)
-    integration_order = 1 if adf_result[1] > 0.05 else 0
+    try:
+        adf_result = adfuller(data)
+        integration_order = 1 if adf_result[1] > 0.05 else 0
+    except Exception as e:
+        logger.warning(f"Stationarity test failed: {e}, using integration order 1")
+        integration_order = 1
 
     # Auto-select ARIMA order using information criteria
     best_aic = float('inf')
@@ -609,10 +665,10 @@ def infer_frequency_from_data(df: pd.DataFrame) -> str:
     return '1D'
 
 if __name__ == '__main__':
-    from .data_fetcher import fetch_crypto_data
+    from .data_fetcher import fetch_universal_data
 
-    symbol = 'BTC/USDT'
-    btc_data = fetch_crypto_data(symbol, timeframe='1d', limit=365)
+    symbol = 'BTC-USD'
+    btc_data = fetch_universal_data(symbol, timeframe='1d', limit=365)
 
     if btc_data is not None:
         print(f"--- Testing Prophet for {symbol} ---")

@@ -1,12 +1,12 @@
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
-from src.forecasting import generate_forecast
+from .forecasting import generate_forecast
 import logging
 from typing import Any
 logger = logging.getLogger(__name__)
 
-def perform_backtest(df: pd.DataFrame, model_name: str, periods: int) -> dict[str, Any]:
+def perform_backtest(df: pd.DataFrame, model_name: str, periods: int, freq: str = '1d') -> dict[str, Any]:
     """
     Performs a simple backtest for a given model (legacy method).
 
@@ -14,6 +14,7 @@ def perform_backtest(df: pd.DataFrame, model_name: str, periods: int) -> dict[st
         df (pd.DataFrame): The historical data.
         model_name (str): The name of the model to backtest.
         periods (int): The number of periods to forecast and evaluate.
+        freq (str): The frequency of the data (e.g., '1d', '1h', '4h').
 
     Returns:
         dict: A dictionary containing the backtest metrics (MAE, RMSE).
@@ -26,7 +27,7 @@ def perform_backtest(df: pd.DataFrame, model_name: str, periods: int) -> dict[st
     test_df = df.iloc[-periods:]
 
     # Generate a forecast on the training data
-    forecast_df = generate_forecast(train_df, model_name, periods)
+    forecast_df = generate_forecast(train_df, model_name, periods=periods, freq=freq)
 
     if forecast_df is None or forecast_df.empty:
         return {"error": f"Forecast generation failed for {model_name} during backtest."}
@@ -53,7 +54,8 @@ def walk_forward_validation(
     min_train_size: int | None = None,
     step_size: int = 1,
     window_type: str = 'expanding',
-    max_train_size: int | None = None
+    max_train_size: int | None = None,
+    freq: str = '1d'
 ) -> dict[str, Any]:
     """
     Performs walk-forward validation (time series cross-validation).
@@ -91,7 +93,6 @@ def walk_forward_validation(
     all_actuals = []
 
     # Start from min_train_size
-    current_start = 0
     current_train_end = min_train_size
 
     fold_num = 1
@@ -119,7 +120,7 @@ def walk_forward_validation(
                 break  # Not enough test data
 
             # Generate forecast
-            forecast_df = generate_forecast(train_data, model_name, forecast_periods)
+            forecast_df = generate_forecast(train_data, model_name, periods=forecast_periods, freq=freq)
 
             if forecast_df is None or forecast_df.empty:
                 logger.warning(f"Fold {fold_num}: Forecast generation failed")
@@ -266,10 +267,10 @@ def compare_models_walkforward(
     }
 
 if __name__ == '__main__':
-    from .data_fetcher import fetch_crypto_data
+    from data_fetcher import fetch_universal_data
 
-    symbol = 'BTC/USDT'
-    btc_data = fetch_crypto_data(symbol, timeframe='1d', limit=365)
+    symbol = 'BTC-USD'
+    btc_data = fetch_universal_data(symbol, timeframe='1d', limit=365)
 
     if btc_data is not None:
         models_to_test = ['Prophet', 'ARIMA', 'ETS']

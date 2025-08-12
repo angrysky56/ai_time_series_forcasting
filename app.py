@@ -2,25 +2,27 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
+
 from src.data_fetcher import (
-    fetch_crypto_data,
-    try_multiple_exchanges,
+    fetch_universal_data,
     discover_symbols,
-    get_available_exchanges,
-    validate_timeframe_support,
-    fetch_stock_data
+    validate_timeframe_support
 )
 from src.multi_period_forecaster import MultiPeriodForecaster
 from src.ai_parameter_optimizer import AIParameterOptimizer
 from src.market_indicators import MarketIndicatorsAnalyzer
 from src.forecasting import generate_forecast
-from src.llm_integration import get_ai_analysis
+from src.llm_integration import get_ai_analysis, get_multi_period_ai_analysis
 from src.technical_analysis import calculate_sma, calculate_ema, calculate_rsi
 from src.backtesting import walk_forward_validation, compare_models_walkforward
+from src.utils.chart_renderer import StreamlitChartRenderer, ChartRenderError
 
 st.set_page_config(layout="wide", page_title="AI Crypto Forecaster")
 st.title("🤖 AI-Assisted Crypto Forecaster")
 st.markdown("*Enhanced with Walk-Forward Validation & Multi-Exchange Support*")
+
+# Initialize chart renderer with error boundaries
+chart_renderer = StreamlitChartRenderer()
 
 # Initialize session state
 if 'discovered_symbols' not in st.session_state:
@@ -38,25 +40,16 @@ data_source = st.sidebar.selectbox(
     help="Auto-detect based on symbol format"
 )
 
-# Exchange selection
-if data_source in ['auto', 'crypto']:
-    available_exchanges = get_available_exchanges()
-    exchange_name = st.sidebar.selectbox(
-        "Exchange",
-        available_exchanges,
-        index=available_exchanges.index(st.session_state.selected_exchange)
-        if st.session_state.selected_exchange in available_exchanges else 0
-    )
-else:
-    exchange_name = 'yfinance'
-    st.sidebar.info("Using yfinance for stock data")
+# Since we're using yfinance exclusively, simplify the exchange selection
+st.sidebar.info("📈 Using Yahoo Finance for all data")
+exchange_name = 'yfinance'
 
-# Symbol discovery
-if data_source in ['auto', 'crypto'] and st.sidebar.button("🔍 Discover Symbols", help="Find available trading pairs"):
-    with st.spinner(f"Discovering symbols from {exchange_name}..."):
-        symbols = discover_symbols(exchange_name, limit=500)
+# Symbol discovery - show available symbols
+if st.sidebar.button("🔍 Show Available Symbols", help="Show available trading symbols"):
+    with st.spinner("Loading available symbols..."):
+        symbols = discover_symbols('yfinance', limit=100)
         st.session_state.discovered_symbols = symbols
-        st.session_state.selected_exchange = exchange_name
+        st.session_state.selected_exchange = 'yfinance'
     if symbols:
         st.sidebar.success(f"Found {len(symbols)} symbols")
     else:
@@ -93,7 +86,7 @@ analysis_mode = st.sidebar.selectbox(
 
 # Initialize variables with defaults
 timeframe = '1d'
-data_limit = 500
+data_limit = 5000
 
 if analysis_mode == "Single Period":
     # Timeframe selection with validation
@@ -213,15 +206,21 @@ if start_button:
             # Display data overview
             st.success(f"✅ Fetched data for {len(multi_data)} timeframes")
 
-            # Data summary table
+            # Data summary table with proper period information
             summary_data = []
             for period, df in multi_data.items():
-                summary_data.append({
-                    'Timeframe': period.title(),
-                    'Data Points': len(df),
-                    'Latest Price': f"${df['close'].iloc[-1]:.4f}",
-                    'Price Change': f"{((df['close'].iloc[-1] - df['close'].iloc[-10]) / df['close'].iloc[-10] * 100):+.2f}%"
-                })
+                if len(df) > 0:
+                    latest = df.iloc[-1]
+                    previous = df.iloc[-2] if len(df) > 1 else df.iloc[-1]
+
+                    summary_data.append({
+                        'Timeframe': period.title(),
+                        'Data Points': len(df),
+                        'Period Open': f"${latest.get('period_open', latest['open']):.4f}",
+                        'Period Close': f"${latest.get('period_close', latest['close']):.4f}",
+                        'Period Change': f"{latest.get('period_change', 0.0):+.2f}%",
+                        'Period-to-Period': f"{latest.get('period_to_period_change', 0.0):+.2f}%"
+                    })
 
             summary_df = pd.DataFrame(summary_data)
             st.dataframe(summary_df, use_container_width=True)
@@ -316,82 +315,25 @@ if start_button:
                 with st.spinner("Generating coherent analysis report..."):
                     report = forecaster.generate_coherent_report()
 
-                # Display multi-period charts
+                # Multi-Period Forecast Visualization with error boundaries
                 st.subheader("📈 Multi-Period Forecast Visualization")
 
-                # Create subplot for each timeframe
-                fig = make_subplots(
-                    rows=2, cols=2,
-                    subplot_titles=('Monthly Outlook', 'Weekly Outlook', 'Daily Outlook', 'Hourly Outlook'),
-                    shared_xaxes=False,
-                    vertical_spacing=0.08
-                )
-
-                positions = [(1,1), (1,2), (2,1), (2,2)]
-                colors = ['blue', 'green', 'orange', 'red']
-
-                for i, (period, forecast_df) in enumerate(forecasts.items()):
-                    if i < 4:  # Only show 4 timeframes in grid
-                        row, col = positions[i]
-
-                        # Historical data
-                        historical_data = multi_data[period]
-                        fig.add_trace(
-                            go.Scatter(
-                                x=historical_data['timestamp'].tail(50),
-                                y=historical_data['close'].tail(50),
-                                mode='lines',
-                                name=f'{period.title()} Historical',
-                                line=dict(color=colors[i], width=1),
-                                opacity=0.7
-                            ),
-                            row=row, col=col
+                try:
+                    fig = chart_renderer.create_multi_period_chart(multi_data, forecasts, symbol)
+                    if fig is not None:
+                        chart_renderer.render_safe_chart(
+                            fig,
+                            "Multi-Period Forecast Analysis",
+                            use_container_width=True
                         )
-
-                        # Forecast
-                        fig.add_trace(
-                            go.Scatter(
-                                x=forecast_df['ds'],
-                                y=forecast_df['yhat'],
-                                mode='lines',
-                                name=f'{period.title()} Forecast',
-                                line=dict(color=colors[i], width=3)
-                            ),
-                            row=row, col=col
-                        )
-
-                        # Confidence intervals if available
-                        if 'yhat_lower' in forecast_df.columns and forecast_df['yhat_lower'].notna().any():
-                            fig.add_trace(
-                                go.Scatter(
-                                    x=forecast_df['ds'],
-                                    y=forecast_df['yhat_upper'],
-                                    mode='lines',
-                                    line=dict(width=0),
-                                    showlegend=False
-                                ),
-                                row=row, col=col
-                            )
-                            fig.add_trace(
-                                go.Scatter(
-                                    x=forecast_df['ds'],
-                                    y=forecast_df['yhat_lower'],
-                                    mode='lines',
-                                    line=dict(width=0),
-                                    fill='tonexty',
-                                    fillcolor='rgba(128, 128, 128, 0.2)',
-                                    showlegend=False
-                                ),
-                                row=row, col=col
-                            )
-
-                fig.update_layout(
-                    title=f"{symbol} - Multi-Period Forecast Analysis",
-                    height=800,
-                    showlegend=False
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.error("❌ Chart creation returned no figure.")
+                except ChartRenderError as e:
+                    st.error(f"❌ Multi-period chart creation failed: {e}")
+                    st.info("💡 Try adjusting the data range or timeframe selection")
+                except Exception as e:
+                    st.error(f"❌ Unexpected chart error: {e}")
+                    st.info("💡 Please refresh the page and try again")
 
                 # Summary and Recommendations
                 st.subheader("📋 Multi-Period Summary & Recommendations")
@@ -411,36 +353,33 @@ if start_button:
                     st.write("**AI Recommendations:**")
                     for rec in report['recommendations']:
                         st.write(f"• {rec}")
+
+                # Optional: Multi-period AI narrative
+                with st.spinner("AI Analyst is synthesizing multi-period insights..."):
+                    try:
+                        ai_multi = get_multi_period_ai_analysis(
+                            symbol=symbol,
+                            multi_historical=multi_data,
+                            multi_forecasts=forecasts,
+                            report=report,
+                            exchange_info={"exchange": exchange_name}
+                        )
+                        st.info(ai_multi)
+                    except Exception as e:
+                        st.info(f"AI multi-period analysis unavailable: {e}")
             else:
                 st.error("❌ Failed to generate multi-period forecasts")
 
     else:
-        # === SINGLE PERIOD ANALYSIS (EXISTING LOGIC) ===
-        # Data fetching with fallback
-        with st.spinner(f"Fetching {symbol} data from {exchange_name}..."):
-            if data_source == 'stock':
-                data = fetch_stock_data(symbol, timeframe, data_limit)
-                successful_exchange = 'yfinance' if data is not None else None
-            elif data_source == 'crypto':
-                data = fetch_crypto_data(symbol, timeframe, data_limit, exchange_name)
-                successful_exchange = exchange_name if data is not None else None
-            else:  # auto detection
-                if '/' in symbol or symbol.endswith('USDT') or symbol.endswith('USD'):
-                    if exchange_name == 'auto':
-                        data, successful_exchange = try_multiple_exchanges(symbol, timeframe, data_limit)
-                        if successful_exchange:
-                            st.success(f"✅ Data fetched from {successful_exchange}")
-                            exchange_name = successful_exchange
-                    else:
-                        data = fetch_crypto_data(symbol, timeframe, data_limit, exchange_name)
-                        successful_exchange = exchange_name if data is not None else None
-                else:
-                    data = fetch_stock_data(symbol, timeframe, data_limit)
-                    successful_exchange = 'yfinance' if data is not None else None
+        # === SINGLE PERIOD ANALYSIS ===
+        # Data fetching with yfinance
+        with st.spinner(f"Fetching {symbol} data..."):
+            data = fetch_universal_data(symbol, timeframe, data_limit)
+            successful_exchange = 'yfinance' if data is not None else None
 
         if data is None or data.empty:
-            st.error(f"❌ Could not fetch data for {symbol} from {exchange_name}")
-            st.info("💡 Try a different symbol or exchange")
+            st.error(f"❌ Could not fetch data for {symbol}")
+            st.info("💡 Try a different symbol or check if the symbol exists on Yahoo Finance")
         else:
             # Data summary
             col1, col2, col3, col4 = st.columns(4)
@@ -455,247 +394,98 @@ if start_button:
             with col4:
                 st.metric("Volatility", f"{data['close'].pct_change().std()*100:.2f}%")
 
-            # AI Indicator Selection (if enabled)
-            if use_ai_indicators:
-                st.subheader("🤖 AI-Optimized Indicators")
-
-                with st.spinner("AI optimizing indicators..."):
-                    optimizer = AIParameterOptimizer(data)
-                    selected_indicators = optimizer.auto_select_indicators(
-                        max_indicators=max_indicators,
-                        categories=indicator_categories
-                    )
-
-                if selected_indicators:
-                    indicator_summary = []
-                    for indicator, config in selected_indicators.items():
-                        indicator_summary.append({
-                            'Indicator': indicator,
-                            'Category': config['category'].title(),
-                            'Score': f"{config['score']:.3f}",
-                            'Parameters': str(config.get('parameters', {}))
-                        })
-
-                    st.dataframe(pd.DataFrame(indicator_summary), use_container_width=True)
-
-            # Calculate technical indicators (existing logic)
-            if show_sma and 'sma_window' in st.session_state:
-                data = calculate_sma(data, st.session_state.sma_window)
-            if show_ema and 'ema_span' in st.session_state:
-                data = calculate_ema(data, st.session_state.ema_span)
-            if show_rsi and 'rsi_window' in st.session_state:
-                data = calculate_rsi(data, st.session_state.rsi_window)
-
-    # Data fetching with fallback
-    with st.spinner(f"Fetching {symbol} data from {exchange_name}..."):
-        if exchange_name == 'auto':
-            data, successful_exchange = try_multiple_exchanges(symbol, timeframe, data_limit)
-            if successful_exchange:
-                st.success(f"✅ Data fetched from {successful_exchange}")
-                exchange_name = successful_exchange
-        else:
-            data = fetch_crypto_data(symbol, timeframe, data_limit, exchange_name)
-            successful_exchange = exchange_name if data is not None else None
-
-    if data is None or data.empty:
-        st.error(f"❌ Could not fetch data for {symbol} from {exchange_name}")
-        st.info("💡 Try a different symbol or exchange")
-    else:
-        # Data summary
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Data Points", len(data))
-        with col2:
-            st.metric("Date Range", f"{len(data)} {timeframe} periods")
-        with col3:
-            latest_price = data['close'].iloc[-1]
-            price_change = ((latest_price - data['close'].iloc[-2]) / data['close'].iloc[-2] * 100) if len(data) > 1 else 0
-            st.metric("Latest Price", f"${latest_price:.4f}", f"{price_change:+.2f}%")
-        with col4:
-            st.metric("Volatility", f"{data['close'].pct_change().std()*100:.2f}%")
-
-        # Calculate technical indicators
-        if show_sma and 'sma_window' in st.session_state:
+        # Calculate technical indicators (if enabled)
+        if show_sma and 'sma_window' in st.session_state and data is not None:
             data = calculate_sma(data, st.session_state.sma_window)
-        if show_ema and 'ema_span' in st.session_state:
+        if show_ema and 'ema_span' in st.session_state and data is not None:
             data = calculate_ema(data, st.session_state.ema_span)
-        if show_rsi and 'rsi_window' in st.session_state:
+        if show_rsi and 'rsi_window' in st.session_state and data is not None:
             data = calculate_rsi(data, st.session_state.rsi_window)
 
         # Model selection and forecasting
         if use_auto_select and models_to_compare:
             st.subheader("🔄 Model Comparison & Selection")
 
-            with st.spinner("Running walk-forward validation on all models..."):
-                comparison_results = compare_models_walkforward(
-                    data.copy(), models_to_compare, forecast_periods, wf_min_train
-                )
+            if data is not None:
+                with st.spinner("Running walk-forward validation on all models..."):
+                    comparison_results = compare_models_walkforward(
+                        data.copy(), models_to_compare, forecast_periods, wf_min_train
+                    )
 
-            if comparison_results['best_model']:
-                best_model = comparison_results['best_model']
-                best_rmse = comparison_results['best_rmse']
+                if comparison_results['best_model']:
+                    best_model = comparison_results['best_model']
+                    best_rmse = comparison_results['best_rmse']
 
-                # Display comparison results
-                st.success(f"🏆 Best Model: **{best_model}** (RMSE: {best_rmse:.6f})")
+                    # Display comparison results
+                    st.success(f"🏆 Best Model: **{best_model}** (RMSE: {best_rmse:.6f})")
 
-                # Show model comparison table
-                summary_df = pd.DataFrame([
-                    {'Model': model, 'RMSE': rmse}
-                    for model, rmse in comparison_results['summary'].items()
-                ]).sort_values('RMSE')
+                    # Show model comparison table
+                    summary_df = pd.DataFrame([
+                        {'Model': model, 'RMSE': rmse}
+                        for model, rmse in comparison_results['summary'].items()
+                    ]).sort_values('RMSE')
 
-                st.dataframe(summary_df, use_container_width=True)
+                    st.dataframe(summary_df, use_container_width=True)
 
-                # Use best model for final forecast
-                model_name = best_model
+                    # Use best model for final forecast
+                    model_name = best_model
+                else:
+                    st.error("❌ Model comparison failed")
+                    model_name = models_to_compare[0]  # Fallback
             else:
-                st.error("❌ Model comparison failed")
-                model_name = models_to_compare[0]  # Fallback
+                st.error("❌ No data available for model comparison.")
 
         # Generate final forecast
         with st.spinner(f"Generating forecast with {model_name}..."):
             safe_model_name = model_name if isinstance(model_name, str) and model_name else "Prophet"
-            forecast = generate_forecast(data.copy(), safe_model_name, forecast_periods)
+            if data is not None:
+                forecast = generate_forecast(data.copy(), safe_model_name, forecast_periods)
+            else:
+                forecast = None
 
+        # Generate final forecast chart with error boundaries
         if forecast is None or forecast.empty:
             st.error("❌ Forecast generation failed")
         else:
             st.success("✅ Forecast generated successfully!")
 
-            # Create main chart
-            fig = make_subplots(
-                rows=2 if show_rsi else 1,
-                cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.05,
-                row_heights=[0.7, 0.3] if show_rsi else [1.0]
-            )
-
-            # Price data
-            fig.add_trace(
-                go.Candlestick(
-                    x=data['timestamp'],
-                    open=data['open'],
-                    high=data['high'],
-                    low=data['low'],
-                    close=data['close'],
-                    name='Price'
-                ),
-                row=1, col=1
-            )
-
-            # Forecast
-            fig.add_trace(
-                go.Scatter(
-                    x=forecast['ds'],
-                    y=forecast['yhat'],
-                    mode='lines',
-                    name=f'{model_name} Forecast',
-                    line=dict(color='#ff7f0e', width=3)
-                ),
-                row=1, col=1
-            )
-
-            # Confidence intervals if available
-            if 'yhat_lower' in forecast.columns and forecast['yhat_lower'].notna().any():
-                fig.add_trace(
-                    go.Scatter(
-                        x=forecast['ds'],
-                        y=forecast['yhat_upper'],
-                        mode='lines',
-                        line=dict(width=0),
-                        showlegend=False
-                    ),
-                    row=1, col=1
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=forecast['ds'],
-                        y=forecast['yhat_lower'],
-                        mode='lines',
-                        line=dict(width=0),
-                        fill='tonexty',
-                        fillcolor='rgba(255, 127, 14, 0.2)',
-                        showlegend=False
-                    ),
-                    row=1, col=1
-                )
-
-            # Technical indicators
-            if show_sma:
-                fig.add_trace(
-                    go.Scatter(
-                        x=data['timestamp'],
-                        y=data[f'SMA_{st.session_state.sma_window}'],
-                        mode='lines',
-                        name=f'SMA {st.session_state.sma_window}',
-                        line=dict(color='blue')
-                    ),
-                    row=1, col=1
-                )
+            # Prepare technical indicators context for chart renderer
+            tech_indicators = {}
+            if show_sma and 'sma_window' in st.session_state:
+                tech_indicators[f'SMA_{st.session_state.sma_window}'] = st.session_state.sma_window
             if show_ema and 'ema_span' in st.session_state:
-                fig.add_trace(
-                    go.Scatter(
-                        x=data['timestamp'],
-                        y=data[f'EMA_{st.session_state.ema_span}'],
-                        mode='lines',
-                        name=f'EMA {st.session_state.ema_span}',
-                        line=dict(color='green')
-                    ),
-                    row=1, col=1
-                )
-            if show_rsi and 'RSI' in data.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=data['timestamp'],
-                        y=data['RSI'],
-                        mode='lines',
-                        name='RSI',
-                        line=dict(color='purple')
-                    ),
-                    row=2, col=1
-                )
-                fig.add_shape(
-                    type="line",
-                    x0=data['timestamp'].iloc[0],
-                    x1=data['timestamp'].iloc[-1],
-                    y0=70,
-                    y1=70,
-                    line=dict(dash="dash", color="red"),
-                    xref="x2",
-                    yref="y2"
-                )
-                fig.add_shape(
-                    type="line",
-                    x0=data['timestamp'].iloc[0],
-                    x1=data['timestamp'].iloc[-1],
-                    y0=30,
-                    y1=30,
-                    line=dict(dash="dash", color="green"),
-                    xref="x2",
-                    yref="y2"
-                )
-                fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+                tech_indicators[f'EMA_{st.session_state.ema_span}'] = st.session_state.ema_span
 
-            # Update layout
-            fig.update_layout(
-                title=f'{symbol} - {model_name} Forecast ({timeframe} timeframe)',
-                xaxis_rangeslider_visible=False,
-                height=700,
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                )
-            )
+            # Create and render chart with error boundaries
+            try:
+                if data is not None:
+                    fig = chart_renderer.create_single_period_chart(
+                        data=data,
+                        forecast=forecast,
+                        symbol=symbol,
+                        model_name=safe_model_name,
+                        timeframe=timeframe,
+                        technical_indicators=tech_indicators if tech_indicators else None,
+                        show_rsi=show_rsi
+                    )
 
-            fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
-            if show_rsi:
-                fig.update_xaxes(showticklabels=False, row=1, col=1)
+                    if fig is not None:
+                        chart_renderer.render_safe_chart(
+                            fig,
+                            f"{symbol} {safe_model_name} Forecast",
+                            use_container_width=True
+                        )
+                    else:
+                        st.error("❌ Chart creation returned no figure.")
+                else:
+                    st.error("❌ No data available for chart creation.")
 
-            st.plotly_chart(fig, use_container_width=True)
+            except ChartRenderError as e:
+                st.error(f"❌ Chart creation failed: {e}")
+                st.info("💡 Try adjusting the data range or technical indicator settings")
+            except Exception as e:
+                st.error(f"❌ Unexpected chart error: {e}")
+                st.info("💡 Please refresh the page and try again")
 
             # Walk-forward validation results
             wf_results = None  # Ensure wf_results is always defined
@@ -704,24 +494,33 @@ if start_button:
 
                 with st.spinner("Running walk-forward validation..."):
                     safe_model_name = model_name if isinstance(model_name, str) and model_name else "Prophet"
-                    wf_results = walk_forward_validation(
-                        data.copy(), safe_model_name, forecast_periods, wf_min_train, wf_step_size
-                    )
+                    if data is not None:
+                        wf_results = walk_forward_validation(
+                            data.copy(), safe_model_name, forecast_periods, wf_min_train, wf_step_size,
+                            'expanding', None, timeframe
+                        )
+                    else:
+                        wf_results = {'error': 'No data available for walk-forward validation.'}
 
                 if 'error' not in wf_results:
                     col1, col2, col3 = st.columns(3)
 
                     with col1:
                         st.metric("Validation Folds", wf_results['num_folds'])
-                        st.metric("Mean RMSE", f"{wf_results['metrics']['mean_RMSE']:.6f}")
+                        mean_rmse = wf_results['metrics']['mean_RMSE'] if isinstance(wf_results['metrics'], dict) and 'mean_RMSE' in wf_results['metrics'] else 0
+                        st.metric("Mean RMSE", f"{mean_rmse:.6f}")
 
                     with col2:
-                        st.metric("Mean MAE", f"{wf_results['metrics']['mean_MAE']:.6f}")
-                        st.metric("Mean MAPE", f"{wf_results['metrics']['mean_MAPE']:.2f}%")
+                        mean_mae = wf_results['metrics']['mean_MAE'] if isinstance(wf_results['metrics'], dict) and 'mean_MAE' in wf_results['metrics'] else 0
+                        mean_mape = wf_results['metrics']['mean_MAPE'] if isinstance(wf_results['metrics'], dict) and 'mean_MAPE' in wf_results['metrics'] else 0
+                        st.metric("Mean MAE", f"{mean_mae:.6f}")
+                        st.metric("Mean MAPE", f"{mean_mape:.2f}%")
 
                     with col3:
-                        st.metric("Std RMSE", f"{wf_results['metrics']['std_RMSE']:.6f}")
-                        st.metric("Combined RMSE", f"{wf_results['metrics']['combined_RMSE']:.6f}")
+                        std_rmse = wf_results['metrics']['std_RMSE'] if isinstance(wf_results['metrics'], dict) and 'std_RMSE' in wf_results['metrics'] else 0
+                        combined_rmse = wf_results['metrics']['combined_RMSE'] if isinstance(wf_results['metrics'], dict) and 'combined_RMSE' in wf_results['metrics'] else 0
+                        st.metric("Std RMSE", f"{std_rmse:.6f}")
+                        st.metric("Combined RMSE", f"{combined_rmse:.6f}")
 
                     # Fold performance chart
                     fold_df = pd.DataFrame(wf_results['fold_metrics'])
@@ -750,13 +549,80 @@ if start_button:
 
             # AI Analysis with Enhanced Context
             st.subheader("🤖 AI-Generated Analysis")
+
+            # Market Context Analysis
+            with st.spinner("Analyzing market context..."):
+                market_analyzer = MarketIndicatorsAnalyzer()
+
+                # Determine market type and fetch context
+                market_type = 'crypto' if '/' in symbol or symbol.endswith('USDT') else 'traditional'
+                market_context = market_analyzer.fetch_market_context(
+                    symbol=symbol,
+                    market_type=market_type,
+                    timeframe=timeframe,
+                    limit=100,
+                    exchange=exchange_name if market_type == 'crypto' else None
+                )
+
+                # Generate market context summary
+                market_summary = None
+                if data is not None:
+                    market_summary = market_analyzer.generate_market_context_summary(symbol, data)
+
+            # Display market context insights
+            if market_summary and market_summary.get('insights'):
+                st.subheader("📊 Market Context & Risk Assessment")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    regime = market_summary['market_regime']
+                    st.metric("Market Regime", regime['regime_type'].replace('_', ' ').title())
+                    st.metric("Risk Level", regime['risk_level'].title())
+                    st.metric("Volatility", regime['volatility_state'].title())
+
+                with col2:
+                    st.write("**Key Correlations:**")
+                    correlations = market_summary.get('correlations', {})
+                    for indicator, corr in list(correlations.items())[:3]:
+                        direction = "↗️" if corr > 0 else "↘️"
+                        st.write(f"{direction} {indicator}: {corr:.3f}")
+
+                with col3:
+                    trend = regime['trend_direction']
+                    trend_emoji = "📈" if trend == 'bullish' else "📉" if trend == 'bearish' else "↔️"
+                    st.metric("Market Trend", f"{trend_emoji} {trend.title()}")
+
+                # Market insights
+                if market_summary['insights']:
+                    st.write("**Market Insights:**")
+                    for insight in market_summary['insights']:
+                        st.write(f"• {insight}")
+
+                # Risk factors and opportunities
+                col_risk, col_opp = st.columns(2)
+
+                with col_risk:
+                    risks = market_summary.get('risk_factors', [])
+                    if risks:
+                        st.write("**⚠️ Risk Factors:**")
+                        for risk in risks:
+                            st.write(f"• {risk}")
+
+                with col_opp:
+                    opportunities = market_summary.get('opportunities', [])
+                    if opportunities:
+                        st.write("**💡 Opportunities:**")
+                        for opp in opportunities:
+                            st.write(f"• {opp}")
+
             with st.spinner("AI Analyst is analyzing the forecast..."):
 
                 # Build technical indicators context
                 technical_context = {}
-                if show_sma and f'SMA_{st.session_state.sma_window}' in data.columns:
+                if data is not None and show_sma and f'SMA_{st.session_state.sma_window}' in data.columns:
                     technical_context[f'SMA_{st.session_state.sma_window}'] = data[f'SMA_{st.session_state.sma_window}'].iloc[-1]
-                if show_rsi and 'RSI' in data.columns:
+                if data is not None and show_rsi and 'RSI' in data.columns:
                     rsi_value = data['RSI'].iloc[-1]
                     technical_context['RSI'] = rsi_value
                     if rsi_value > 70:
@@ -770,7 +636,7 @@ if start_button:
                 exchange_context = {
                     'exchange': exchange_name,
                     'timeframe': timeframe,
-                    'data_points': len(data)
+                    'data_points': len(data) if data is not None else 0
                 }
 
                 # Get validation results if walk-forward was used
@@ -782,15 +648,16 @@ if start_button:
                 elif use_auto_select and comparison_results is not None:
                     validation_context = comparison_results.get('comparison_results', {}).get(model_name)
 
-                # Call enhanced AI analysis
+                # Call enhanced AI analysis with market context
                 ai_summary = get_ai_analysis(
                     symbol=symbol,
-                    historical_data=data,
+                    historical_data=data if data is not None else pd.DataFrame(),
                     forecast_data=forecast,
                     model_name=model_name,
                     validation_results=validation_context,
                     technical_indicators=technical_context if technical_context else None,
-                    exchange_info=exchange_context
+                    exchange_info=exchange_context,
+                    market_context=market_summary if 'market_summary' in locals() else None
                 )
                 st.info(ai_summary)
 

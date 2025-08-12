@@ -8,7 +8,7 @@ import numpy as np
 from typing import Any
 import logging
 from src.forecasting import generate_forecast
-from src.data_fetcher import fetch_crypto_data, fetch_stock_data
+from src.data_fetcher import fetch_universal_data
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +16,12 @@ class MultiPeriodForecaster:
     """Generates coherent forecasts across multiple time periods."""
     
     def __init__(self):
+        # Direct timeframe mapping to yfinance intervals with proper periods
         self.timeframes = {
-            'monthly': {'tf': '1d', 'periods': 30, 'limit': 365},
-            'weekly': {'tf': '4h', 'periods': 42, 'limit': 500},  # 7 days * 6 periods
-            'daily': {'tf': '1h', 'periods': 24, 'limit': 720},
-            'hourly': {'tf': '15m', 'periods': 12, 'limit': 500}  # 3 hours ahead
+            'monthly': {'interval': '1mo', 'periods': 12, 'limit': 60},      # 5 years of monthly data for better analysis
+            'weekly': {'interval': '1wk', 'periods': 26, 'limit': 104},      # 2 years of weekly data 
+            'daily': {'interval': '1d', 'periods': 30, 'limit': 365},        # 1 year of daily data
+            'hourly': {'interval': '1h', 'periods': 168, 'limit': 720}       # 30 days of hourly data (168 = 1 week forecast)
         }
         
         self.forecasts = {}
@@ -33,30 +34,75 @@ class MultiPeriodForecaster:
         exchange: str | None = None
     ) -> dict[str, pd.DataFrame]:
         """
-        Fetch data for all time periods.
+        Fetch data for all time periods with proper aggregation.
         
         Args:
             symbol: Trading symbol
             source: 'crypto', 'stock', or 'auto'
-            exchange: Specific exchange for crypto
+            exchange: Compatibility parameter (not used with yfinance)
         
         Returns:
             Dictionary of timeframe -> DataFrame
         """
         data = {}
         
+        # Convert timeframe keys to match yfinance intervals
+        yf_interval_map = {
+            'monthly': '1mo',
+            'weekly': '1wk',
+            'daily': '1d',
+            'hourly': '1h'
+        }
+        
         for period_name, config in self.timeframes.items():
             try:
-                if source == 'stock' or (source == 'auto' and '/' not in symbol):
-                    df = fetch_stock_data(symbol, config['tf'], config['limit'])
-                else:
-                    df = fetch_crypto_data(symbol, config['tf'], config['limit'], exchange or 'coinbase')
+                # Use the proper yfinance interval for each timeframe
+                yf_interval = yf_interval_map[period_name]
                 
-                if df is not None:
+                # Fetch data using the correct interval
+                df = fetch_universal_data(symbol, yf_interval, config['limit'])
+                
+                if df is not None and not df.empty:
+                    # Add period-specific metadata
+                    df['period'] = period_name
+                    
+                    # Calculate proper period statistics with correct open/close logic
+                    df = df.sort_values('timestamp').reset_index(drop=True)
+                    
+                    # For all periods, calculate period-over-period changes
+                    if len(df) > 1:
+                        # Period open is the opening price of each period
+                        df['period_open'] = df['open']
+                        df['period_close'] = df['close']
+                        
+                        # Calculate period change (close vs open of same period)
+                        df['period_change'] = ((df['close'] - df['open']) / df['open'] * 100).round(2)
+                        
+                        # Calculate period-to-period change (close vs previous close)
+                        df['period_to_period_change'] = df['close'].pct_change() * 100
+                        df['period_to_period_change'] = df['period_to_period_change'].round(2)
+                        
+                        # Add high/low information for better context
+                        df['period_high'] = df['high']
+                        df['period_low'] = df['low']
+                        df['period_range'] = ((df['high'] - df['low']) / df['low'] * 100).round(2)
+                    
+                    # Add volume information if available
+                    if 'volume' in df.columns:
+                        df['volume'] = df['volume']
+                    
                     data[period_name] = df
-                    logger.info(f"Fetched {len(df)} records for {period_name} timeframe")
+                    logger.info(f"Fetched {len(df)} {period_name} records for {symbol}")
+                    
+                    # Log sample data for debugging with proper period info
+                    if len(df) > 3:
+                        latest_period = df.iloc[-1]
+                        logger.info(f"{period_name} latest period - Open: {latest_period['period_open']:.2f}, "
+                                  f"Close: {latest_period['period_close']:.2f}, "
+                                  f"Change: {latest_period['period_change']:.2f}%")
                 else:
-                    logger.warning(f"Failed to fetch data for {period_name} timeframe")
+                    logger.warning(f"Failed to fetch {period_name} data for {symbol}")
+                    
             except Exception as e:
                 logger.error(f"Error fetching {period_name} data: {e}")
         
@@ -82,7 +128,8 @@ class MultiPeriodForecaster:
         for period_name, df in data.items():
             try:
                 config = self.timeframes[period_name]
-                forecast = generate_forecast(df.copy(), model_name, config['periods'])
+                # Pass the correct frequency interval from config
+                forecast = generate_forecast(df.copy(), model_name, config['periods'], config['interval'])
                 
                 if forecast is not None:
                     forecasts[period_name] = forecast

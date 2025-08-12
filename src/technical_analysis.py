@@ -4,15 +4,11 @@ Provides comprehensive technical indicators with optimal parameter selection.
 """
 
 import pandas as pd
-import numpy as np
 from typing import Any
 from talipp.indicators import (
-    SMA, EMA, WMA, DEMA, TEMA, T3,
-    RSI, MACD, Stoch, StochRSI,
-    BB,
-    ATR, NATR, CHOP,
-    OBV, VWAP,
-    ADX, Aroon, CCI, TSI, ROC
+    SMA, EMA, RSI, MACD, Stoch, BB,
+    ATR, OBV, VWAP,
+    ADX, CCI, ROC
 )
 from talipp.ohlcv import OHLCVFactory
 import logging
@@ -299,10 +295,10 @@ def generate_trading_recommendation(signals: dict[str, str]) -> str:
 
 if __name__ == '__main__':
     # Example usage
-    from data_fetcher import fetch_crypto_data
+    from data_fetcher import fetch_universal_data
 
-    symbol = 'BTC/USDT'
-    data = fetch_crypto_data(symbol, limit=500)
+    symbol = 'BTC-USD'
+    data = fetch_universal_data(symbol, '1d', limit=500)
 
     if data is not None:
         # Calculate indicators

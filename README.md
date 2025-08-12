@@ -68,7 +68,7 @@ venv\Scripts\activate
 Install all the required libraries from the `requirements.txt` file.
 
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### 5. Run the LM Studio Server
